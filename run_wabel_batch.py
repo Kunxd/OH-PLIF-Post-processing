@@ -640,8 +640,9 @@ def resolve_flames(raw):
                 fw.append(f"pos{pos}: only a bg file, no data file → ignored")
                 continue
             if len(ent["data"]) > 1:
-                fw.append(f"pos{pos}: {len(ent['data'])} data files → c̄ averaged over all: "
-                          + ", ".join(os.path.basename(p) for p in ent["data"]))
+                fw.append(f"DUPLICATE pos{pos}: {len(ent['data'])} data files → c̄ is "
+                          f"AVERAGED over all of them: "
+                          + "; ".join(_rel(p) for p in ent["data"]))
             bg = None
             if ent["bg"]:
                 ddir = os.path.dirname(ent["data"][0])
@@ -657,6 +658,14 @@ def resolve_flames(raw):
             positions[pos] = {"data": sorted(ent["data"]), "bg": bg}
         if not positions:
             continue
+        folders = OrderedDict()
+        for pos, e in positions.items():
+            for p in e["data"]:
+                folders.setdefault(_rel(os.path.dirname(p)) or ".", set()).add(pos)
+        if len(folders) > 1:
+            fw.append("FLAME FOUND IN SEVERAL FOLDERS (same name on different days?) → "
+                      "combined into ONE flame: "
+                      + "; ".join(f"{d}: {pos_list_str(ps_)}" for d, ps_ in folders.items()))
         ps = list(positions)
         gaps = [p for p in range(1, max(ps) + 1) if p not in positions]
         if gaps:
@@ -671,8 +680,16 @@ def resolve_flames(raw):
                 fw.append("nozzle diameter NOT found in name and no fallback → "
                           "pos0 extension disabled, A/h exclude the nozzle gap")
         flames[flame] = {"positions": positions, "gaps": gaps, "D": d,
-                         "disc_warnings": fw}
+                         "disc_warnings": fw, "folders": list(folders)}
     return flames
+
+
+def _rel(path):
+    """Path relative to INPUT_DIR (shows the day-folder) for messages."""
+    try:
+        return os.path.relpath(path, INPUT_DIR)
+    except ValueError:
+        return path
 
 
 def source_sig(ent):
@@ -1284,7 +1301,8 @@ def main():
         for e in F["positions"].values():
             total_bytes += sum(os.path.getsize(p) for p in e["data"])
             if e["bg"]: total_bytes += os.path.getsize(e["bg"])
-        log(f"  • {f}   D={F['D']} mm   {pos_list_str(F['positions'])}")
+        log(f"  • {f}   D={F['D']} mm   {pos_list_str(F['positions'])}   "
+            f"[folder: {', '.join(F['folders'])}]")
         for m in F["disc_warnings"]:
             warn(f, m)
     if not flames:
