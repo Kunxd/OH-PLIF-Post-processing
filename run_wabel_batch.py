@@ -36,6 +36,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.colors import LinearSegmentedColormap
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from spe_reader import read_spe_metadata, _first_real_frame_index
@@ -116,7 +117,7 @@ try:
 except ImportError:
     _CONFIG_LOCAL = None
 
-SCRIPT_VERSION = "v8"
+SCRIPT_VERSION = "v8.1"
 
 # Settings baked into per-position products (logged, never auto-invalidated)
 PROCESSING_KEYS = ["SPATIAL_RES", "CROP_BOTTOM_MM", "CROP_TOP_MM", "NOISE_FLOOR",
@@ -130,7 +131,8 @@ ANALYSIS_KEYS   = ["DO_CBAR", "DO_INSTANT", "CBAR_LEVELS", "CLOSE_THRESHOLD",
                    "N_INSTANT_COMPOSITES", "STITCH_BAND_PX", "MARK_FLAME_HEIGHT"]
 
 AVG_DIR_NAME  = "average composites"
-INST_DIR_NAME = "instantaneous"
+INST_DIR_NAME = "instantaneous"            # raw (bg-subtracted) + front
+INST_BIN_DIR_NAME = "instantaneous_binarized"  # binary + front
 
 
 def current_settings(keys):
@@ -516,6 +518,7 @@ def process_position(job):
         bg = None
         if job["bg_path"]:
             bg, bg_info = load_bg_mean(job["bg_path"])
+            atomic_save_npy(os.path.join(pd, "bg_mean.npy"), bg)
             for n in bg_info["notes"]:
                 W.append(f"bg '{os.path.basename(job['bg_path'])}': {n}")
         else:
@@ -982,6 +985,50 @@ def finalize_cbar(flame, F, fdir, positions):
 # ══════════════════════════════════════════════════════════════════════
 #  Flame finalisation — instantaneous part (best-match chaining)
 # ══════════════════════════════════════════════════════════════════════
+def _spe_real_range(path):
+    """(start, n_real, meta) — same leading-empty-frame skip as open_spe_stream."""
+    meta = read_spe_metadata(path)
+    fb = meta["width"] * meta["height"] * np.dtype(meta["dtype"]).itemsize
+    start = _first_real_frame_index(path, meta["data_start_offset"], fb, meta["count"])
+    return start, meta["count"] - start, meta, fb
+
+
+def _position_bg(fdir, p, ent):
+    """Mean background of a position (cached as posN/bg_mean.npy)."""
+    cache = os.path.join(fdir, f"pos{p}", "bg_mean.npy")
+    if os.path.isfile(cache):
+        return np.load(cache)
+    if ent["bg"] is None:
+        return None
+    bg, _ = load_bg_mean(ent["bg"])
+    atomic_save_npy(cache, bg)
+    return bg
+
+
+def read_raw_instant_frame(ent, g, bg):
+    """Frame g (index as stored in instant_fronts.npz, counted over the
+    position's data files after leading empty frames) → bg-subtracted,
+    clipped at 0, cropped float32 image.  Returns (img, file, frame_in_file)."""
+    for path in ent["data"]:
+        start, n, meta, fb = _spe_real_range(path)
+        if g < n:
+            with open(path, "rb") as f:
+                f.seek(meta["data_start_offset"] + (start + g) * fb)
+                buf = f.read(fb)
+            img = np.frombuffer(buf, dtype=np.dtype(meta["dtype"])).reshape(
+                meta["height"], meta["width"]).astype(np.float32)
+            if bg is not None:
+                b = bg if bg.shape == img.shape else bg[:img.shape[0], :img.shape[1]]
+                img = np.maximum(img - b, 0)
+            return crop_frame(img), os.path.basename(path), int(start + g)
+        g -= n
+    raise IndexError("instantaneous frame index beyond the data files")
+
+
+WHITE_RED = LinearSegmentedColormap.from_list(
+    "white_red", ["#ffffff", "#fcbba1", "#fb6a4a", "#cb181d", "#67000d"])
+
+
 def _edge_masks(bins, top):
     B = max(1, STITCH_BAND_PX)
     band = bins[:, :B, :] if top else bins[:, -B:, :]
@@ -1007,7 +1054,7 @@ def _best_chain(costs, avail):
     return chain
 
 
-def finalize_instant(flame, fdir, positions):
+def finalize_instant(flame, F, fdir, positions):
     data = {}
     for p in positions:
         z = np.load(os.path.join(fdir, f"pos{p}", "instant_fronts.npz"))
@@ -1026,6 +1073,10 @@ def finalize_instant(flame, fdir, positions):
     avail = [np.ones(data[p][0].shape[0], dtype=bool) for p in ps]
 
     idir = os.path.join(fdir, INST_DIR_NAME); os.makedirs(idir, exist_ok=True)
+    bdir = os.path.join(fdir, INST_BIN_DIR_NAME); os.makedirs(bdir, exist_ok=True)
+    for stale in glob.glob(os.path.join(idir, "instant_binary_composite_*.npy")):
+        os.remove(stale)        # binary composites now live in instantaneous_binarized/
+    bgs = {p: _position_bg(fdir, p, F["positions"][p]) for p in ps}
     out = []
     for ci in range(1, N_INSTANT_COMPOSITES + 1):
         chain = _best_chain(costs, avail)
@@ -1037,7 +1088,7 @@ def finalize_instant(flame, fdir, positions):
             avail[k][a] = False
         jc = [float(costs[k][chain[k], chain[k + 1]]) for k in range(len(costs))]
 
-        fr_strips, bi_strips, bounds, y = [], [], [], 0
+        fr_strips, bi_strips, raw_strips, srcs, bounds, y = [], [], [], {}, [], 0
         for k in range(len(ps) - 1, -1, -1):        # top position first
             p = ps[k]
             fr = data[p][0][chain[k]].copy()
@@ -1046,41 +1097,76 @@ def finalize_instant(flame, fdir, positions):
             # don't show up as horizontal lines at every position junction.
             fr[0, :] = False; fr[-1, :] = False; fr[:, 0] = False; fr[:, -1] = False
             fr_strips.append(fr); bi_strips.append(data[p][1][chain[k]])
-            bounds.append((y, p, int(data[p][2][chain[k]])))
+            g = int(data[p][2][chain[k]])
+            raw, fname, fidx = read_raw_instant_frame(F["positions"][p], g, bgs[p])
+            if raw.shape != fr.shape:
+                raise ValueError(f"pos{p}: raw frame shape {raw.shape} ≠ stored front "
+                                 f"shape {fr.shape}")
+            raw_strips.append(raw)
+            srcs[f"pos{p}"] = {"file": fname, "frame_in_file": fidx}
+            bounds.append((y, p, g))
             y += data[p][0].shape[1]
-        FR = np.vstack(fr_strips); BI = np.vstack(bi_strips)
-        atomic_save_npy(os.path.join(idir, f"instant_front_composite_{ci}.npy"), FR)
-        atomic_save_npy(os.path.join(idir, f"instant_binary_composite_{ci}.npy"), BI)
+        FR = np.vstack(fr_strips); BI = np.vstack(bi_strips); RAW = np.vstack(raw_strips)
+        for d_ in (idir, bdir):
+            atomic_save_npy(os.path.join(d_, f"instant_front_composite_{ci}.npy"), FR)
+        atomic_save_npy(os.path.join(bdir, f"instant_binary_composite_{ci}.npy"), BI)
+        atomic_save_npy(os.path.join(idir, f"instant_raw_composite_{ci}.npy"), RAW)
         info = {"flame": flame, "composite": ci,
                 "frames_used": {f"pos{p}": int(data[p][2][chain[k]]) for k, p in enumerate(ps)},
+                "source_frames": srcs,
                 "junction_mismatch_px": {f"pos{ps[k]}|pos{ps[k + 1]}": jc[k]
                                          for k in range(len(jc))},
                 "note": "Positions were recorded at different times: this is a "
                         "SYNTHETIC stitched front for visualisation only.",
                 "rows_top_to_bottom": [{"row_offset": b[0], "pos": b[1], "frame": b[2]}
                                        for b in bounds]}
-        atomic_write_json(os.path.join(idir, f"instant_composite_{ci}_info.json"), info)
+        for d_ in (idir, bdir):
+            atomic_write_json(os.path.join(d_, f"instant_composite_{ci}_info.json"), info)
 
-        rgb = np.zeros(FR.shape + (3,), dtype=np.uint8)
-        rgb[BI] = (70, 70, 70)
         FRd = cv2.dilate(FR.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
-        rgb[FRd] = (255, 40, 40)
+
+        def _annotate(ax, txt_color):
+            ax.axvline(x=NOZZLE_CENTER, color='goldenrod', linestyle='--', linewidth=1, alpha=0.8)
+            for yo, p, fi in bounds:
+                if yo > 0:
+                    ax.axhline(y=yo, color='orange', linestyle=':', linewidth=0.6, alpha=0.9)
+                ax.text(FR.shape[1] - 5, yo + 15, f'pos{p}  frame {fi}', ha='right', va='top',
+                        fontsize=7, color='darkorange')
+            for k in range(len(jc)):
+                yo = [b[0] for b in bounds if b[1] == ps[k + 1]][0] + data[ps[k + 1]][0].shape[1]
+                ax.text(5, yo - 5, f'mismatch {jc[k]:.0f} px', ha='left', va='bottom',
+                        fontsize=7, color=txt_color)
+
+        # ── raw (bg-subtracted) signal: 0 = white → strong = red, front = blue
+        pos_vals = RAW[RAW > 0]
+        vmax = float(np.percentile(pos_vals, 99.5)) if pos_vals.size else 1.0
         fig, ax = plt.subplots(1, 1, figsize=(10, FR.shape[0] / FR.shape[1] * 10), dpi=150)
-        ax.imshow(rgb, aspect='equal', interpolation='nearest')
-        ax.axvline(x=NOZZLE_CENTER, color='goldenrod', linestyle='--', linewidth=1, alpha=0.8)
-        for yo, p, fi in bounds:
-            if yo > 0:
-                ax.axhline(y=yo, color='orange', linestyle=':', linewidth=0.6, alpha=0.8)
-            ax.text(FR.shape[1] - 5, yo + 15, f'pos{p}  frame {fi}', ha='right', va='top',
-                    fontsize=7, color='orange')
-        for k in range(len(jc)):
-            yo = [b[0] for b in bounds if b[1] == ps[k + 1]][0] + data[ps[k + 1]][0].shape[1]
-            ax.text(5, yo - 5, f'mismatch {jc[k]:.0f} px', ha='left', va='bottom',
-                    fontsize=7, color='cyan')
-        ax.set_title(f"{flame} — stitched instantaneous front #{ci} "
+        im = ax.imshow(RAW, cmap=WHITE_RED, vmin=0, vmax=max(vmax, 1e-6),
+                       aspect='equal', interpolation='nearest')
+        ov = np.zeros(FR.shape + (4,), dtype=float)
+        ov[FRd] = (0.0, 0.25, 1.0, 1.0)
+        ax.imshow(ov, aspect='equal', interpolation='nearest')
+        _annotate(ax, 'black')
+        cb = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+        cb.set_label('OH-PLIF signal, bg-subtracted [counts]', fontsize=9)
+        ax.set_title(f"{flame} — stitched instantaneous front #{ci}, raw signal "
                      f"(synthetic: positions not simultaneous)", fontsize=9)
         ax.axis('off'); fig.tight_layout()
         fig.savefig(os.path.join(idir, f"instant_composite_{ci}.png"),
+                    bbox_inches='tight', dpi=150)
+        plt.close(fig)
+
+        # ── binarized version (as before)
+        rgb = np.zeros(FR.shape + (3,), dtype=np.uint8)
+        rgb[BI] = (70, 70, 70)
+        rgb[FRd] = (255, 40, 40)
+        fig, ax = plt.subplots(1, 1, figsize=(10, FR.shape[0] / FR.shape[1] * 10), dpi=150)
+        ax.imshow(rgb, aspect='equal', interpolation='nearest')
+        _annotate(ax, 'cyan')
+        ax.set_title(f"{flame} — stitched instantaneous front #{ci}, binarized "
+                     f"(synthetic: positions not simultaneous)", fontsize=9)
+        ax.axis('off'); fig.tight_layout()
+        fig.savefig(os.path.join(bdir, f"instant_composite_{ci}.png"),
                     bbox_inches='tight', dpi=150)
         plt.close(fig)
         out.append(info)
@@ -1242,7 +1328,7 @@ def finalize_flame(flame, F):
             warn(flame, "c̄ results missing for some positions → no c-line output")
     if DO_INSTANT:
         if all("instant" in mans[p]["products"] for p in positions):
-            result["instant"] = finalize_instant(flame, fdir, positions)
+            result["instant"] = finalize_instant(flame, F, fdir, positions)
         else:
             warn(flame, "instantaneous fronts missing for some positions")
     build_settings_log(flame, fdir, positions, mans)

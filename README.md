@@ -37,7 +37,8 @@ folder name; the nozzle diameter is read from `D<n>` in it.
 
 ## Output (per flame, in `OUTDIR/<flame name>/`)
 - `average composites/` – c̄ composite without / per / with all c-lines, `cbar_composite.npy`, `c_lines.npz`
-- `instantaneous/` – stitched instantaneous fronts (PNG + `.npy` + frame info `.json`)
+- `instantaneous/` – stitched instantaneous fronts on the raw bg-subtracted signal (white → red, front in blue; PNG + `.npy` + frame info `.json`)
+- `instantaneous_binarized/` – the same stitched frames as binary images (PNG + `.npy`)
 - `<flame>_results.xlsx` – A and h per c̄ level, area breakdown, input files
 - `user_settings_log.txt` – settings used per position
 - `posN/` – `cbar.npy`, instantaneous fronts, overlays, `done.json` (resume marker)
