@@ -57,6 +57,9 @@ CHUNK_FRAMES    = 25     # frames read per chunk (RAM vs. disk-seek trade-off)
 
 # ── Run control ─────────────────────────────────────────────────────
 DRY_RUN                 = False  # True: only discover + resume scan, no processing
+MAX_FLAMES              = None   # e.g. 1 → only the first flame (alphabetical); None = all
+ONLY_FLAMES             = []     # e.g. ["Re15000_phi1"] → only flames whose name contains
+                                 # one of these texts; [] = no filter
 REBUILD_FINISHED_FLAMES = False  # True: redo composites/Excel of finished flames
 ALLOW_POSITION_GAPS     = False  # True: build composites even if e.g. pos3 missing
 MISSING_BG_ACTION       = "warn" # "warn": process without bg subtraction (logged)
@@ -1307,6 +1310,17 @@ def main():
             warn(f, m)
     if not flames:
         log("ERROR: no flames found."); sys.exit(1)
+    if ONLY_FLAMES or MAX_FLAMES:
+        names = list(flames)
+        if ONLY_FLAMES:
+            names = [f for f in names if any(t.lower() in f.lower() for t in ONLY_FLAMES)]
+        if MAX_FLAMES:
+            names = names[:int(MAX_FLAMES)]
+        if not names:
+            log(f"ERROR: no flame matches ONLY_FLAMES={ONLY_FLAMES}."); sys.exit(1)
+        flames = OrderedDict((f, flames[f]) for f in names)
+        log(f"\n  >>> LIMITED RUN (ONLY_FLAMES={ONLY_FLAMES}, MAX_FLAMES={MAX_FLAMES}): "
+            f"processing {len(flames)} flame(s): {', '.join(flames)}")
     log(f"  Total .spe data: {total_bytes / 1e9:.1f} GB")
 
     # ── resume scan ──────────────────────────────────────────────────

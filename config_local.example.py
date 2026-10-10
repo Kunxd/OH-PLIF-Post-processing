@@ -12,6 +12,10 @@ N_INSTANT   = 50
 
 DRY_RUN     = False    # True: only list flames / resume status, no processing
 
+# Test on a few flames first:
+MAX_FLAMES  = None     # e.g. 1 → only the first flame in the list; None = all flames
+ONLY_FLAMES = []       # e.g. ["CH4_Re15000_phi1"] → only flames whose name contains this
+
 # Examples of other overrides:
 # NOZZLE_CENTER = 552
 # CBAR_LEVELS   = [0.4, 0.5, 0.6, 0.7]
