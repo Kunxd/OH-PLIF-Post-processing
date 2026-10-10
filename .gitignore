@@ -1,0 +1,9 @@
+config_local.py
+__pycache__/
+*.pyc
+*.spe
+*.npy
+*.npz
+*.xlsx
+*.log
+Wabel_results/
