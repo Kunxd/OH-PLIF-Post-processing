@@ -39,6 +39,7 @@ folder name; the nozzle diameter is read from `D<n>` in it.
 - `average composites/` – c̄ composite without / per / with all c-lines, `cbar_composite.npy`, `c_lines.npz`
 - `instantaneous/` – stitched instantaneous fronts on the raw bg-subtracted signal (white → red, front in blue; PNG + `.npy` + frame info `.json`)
 - `instantaneous_binarized/` – the same stitched frames as binary images (PNG + `.npy`)
+- With `INSTANT_AREA = True`, the inner flame front of each stitched composite (outer product/air edge removed, pockets kept) is revolved 180° per side like the c-lines → `A_inst`, listed in the flame Excel and in the `Instantaneous A` sheet of the combined Excel next to `A_real`.
 - `<flame>_results.xlsx` – A and h per c̄ level, area breakdown, input files
 - `user_settings_log.txt` – settings used per position
 - `posN/` – `cbar.npy`, instantaneous fronts, overlays, `done.json` (resume marker)

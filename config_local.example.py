@@ -9,6 +9,7 @@ NUM_WORKERS = 4        # i7 11th gen (4 cores / 8 threads)
 DO_CBAR     = True
 DO_INSTANT  = True
 N_INSTANT   = 50
+INSTANT_AREA = True    # revolve the stitched instantaneous front → A_inst (sensitivity check)
 
 DRY_RUN     = False    # True: only list flames / resume status, no processing
 

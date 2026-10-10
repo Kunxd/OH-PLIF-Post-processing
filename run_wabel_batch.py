@@ -27,7 +27,7 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ.setdefault(_v, "1")
 
-import sys, re, json, time, shutil, hashlib, traceback, datetime, glob
+import sys, re, json, time, shutil, hashlib, traceback, datetime, glob, math
 from collections import OrderedDict
 import numpy as np
 from scipy.ndimage import maximum_filter
@@ -78,6 +78,13 @@ EXPECTED_FRAMES = 1000   # warn if a position has a different number
 N_INSTANT       = 50     # frames per position stored for instantaneous fronts
 N_INSTANT_COMPOSITES = 3 # stitched instantaneous composites per flame
 STITCH_BAND_PX  = 3      # rows at each position edge used for matching
+INSTANT_AREA    = True   # revolve the stitched instantaneous front (180° per side,
+                         # like the c-lines) → instantaneous surface area A_inst
+GAP_CLOSE_PX    = 5      # seal gaps up to ~this size in the burnt region before
+                         # separating inner front from the outer (ambient) edge
+MIN_POCKET_AREA_PX = 50  # enclosed unburnt pockets smaller than this are ignored
+FRONT_SMOOTH_PX = 5      # smoothing window [px] along the front when measuring its
+                         # length (removes the pixel staircase)
 
 # ── Image processing (unchanged from v7) ────────────────────────────
 SPATIAL_RES     = 0.05
@@ -117,7 +124,7 @@ try:
 except ImportError:
     _CONFIG_LOCAL = None
 
-SCRIPT_VERSION = "v8.2"
+SCRIPT_VERSION = "v8.3"
 
 # Settings baked into per-position products (logged, never auto-invalidated)
 PROCESSING_KEYS = ["SPATIAL_RES", "CROP_BOTTOM_MM", "CROP_TOP_MM", "NOISE_FLOOR",
@@ -128,7 +135,8 @@ INSTANT_KEYS    = ["N_INSTANT", "NOZZLE_CENTER", "N_BIGGEST", "MIN_CONTOUR_PX"]
 ANALYSIS_KEYS   = ["DO_CBAR", "DO_INSTANT", "CBAR_LEVELS", "CLOSE_THRESHOLD",
                    "NOZZLE_CENTER", "POS1_OFFSET_MM", "SPATIAL_RES",
                    "NOZZLE_DIAM_FALLBACK_MM", "ALLOW_POSITION_GAPS",
-                   "N_INSTANT_COMPOSITES", "STITCH_BAND_PX", "MARK_FLAME_HEIGHT"]
+                   "N_INSTANT_COMPOSITES", "STITCH_BAND_PX", "MARK_FLAME_HEIGHT",
+                   "INSTANT_AREA", "GAP_CLOSE_PX", "MIN_POCKET_AREA_PX", "FRONT_SMOOTH_PX"]
 
 AVG_DIR_NAME  = "average composites"
 INST_DIR_NAME = "instantaneous"            # raw (bg-subtracted) + front
@@ -1029,6 +1037,66 @@ WHITE_RED = LinearSegmentedColormap.from_list(
     "white_red", ["#ffffff", "#ffb3b3", "#ff4d4d", "#ff0000", "#dd0000"])
 
 
+def inner_front(FR, BI, nc):
+    """Keep only the reactant/product front: front pixels bordering the
+    unburnt core or enclosed pockets.  Front pixels bordering unburnt
+    regions connected to the LEFT/RIGHT image edge (= ambient air outside
+    the products) are removed.  Returns (inner_front, removed_front, notes)."""
+    notes = []
+    B = BI.astype(np.uint8)
+    if GAP_CLOSE_PX and GAP_CLOSE_PX > 1:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(GAP_CLOSE_PX), int(GAP_CLOSE_PX)))
+        B = cv2.morphologyEx(B, cv2.MORPH_CLOSE, k)
+    U = (B == 0).astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(U, connectivity=4)
+    side = set(np.unique(lab[:, 0]).tolist()) | set(np.unique(lab[:, -1]).tolist())
+    side.discard(0)
+    # core = unburnt component at the bottom row nearest the axis
+    bot = np.where(U[-1] > 0)[0]
+    core = int(lab[-1, bot[np.argmin(np.abs(bot - nc))]]) if bot.size else 0
+    if core and core in side:
+        notes.append("unburnt core is connected to the outside through a gap → part of "
+                     "the inner front may be missing (try a larger GAP_CLOSE_PX)")
+        side.discard(core)
+    keep_lab = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        if i in side:
+            continue
+        if i != core and stats[i, cv2.CC_STAT_AREA] < MIN_POCKET_AREA_PX:
+            continue
+        keep_lab[i] = True
+    keep = keep_lab[lab]
+    near = cv2.dilate(keep.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    return FR & near, FR & ~near, notes
+
+
+def front_revolution_area(front, nc, res, smooth=FRONT_SMOOTH_PX):
+    """Surface area of a 1-px front revolved about the axis x = nc, each
+    side 180° → A = Σ π·r·ds (same convention as the c-lines).
+    The front pixels are traced as contours (a 1-px line is traced once
+    along each side, so every piece is counted twice → divided by 2) and
+    the coordinates are smoothed along the contour so the pixel
+    staircase does not inflate the length."""
+    cnts, _ = cv2.findContours(front.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    A = 0.0
+    k = np.ones(int(smooth)) / int(smooth) if smooth and smooth > 1 else None
+    for c in cnts:
+        pts = c[:, 0, :].astype(float)
+        if len(pts) < 2:
+            continue
+        if k is not None and len(pts) > len(k):
+            pad = len(k)
+            xs = np.convolve(np.r_[pts[-pad:, 0], pts[:, 0], pts[:pad, 0]], k, "same")[pad:-pad]
+            ys = np.convolve(np.r_[pts[-pad:, 1], pts[:, 1], pts[:pad, 1]], k, "same")[pad:-pad]
+        else:
+            xs, ys = pts[:, 0], pts[:, 1]
+        xn, yn = np.roll(xs, -1), np.roll(ys, -1)          # closed contour
+        ds = np.hypot(xn - xs, yn - ys) * res
+        r = np.abs((xs + xn) / 2.0 - nc) * res
+        A += np.sum(np.pi * r * ds)
+    return float(A / 2.0)
+
+
 def _edge_masks(bins, top):
     B = max(1, STITCH_BAND_PX)
     band = bins[:, :B, :] if top else bins[:, -B:, :]
@@ -1074,7 +1142,10 @@ def finalize_instant(flame, F, fdir, positions):
 
     idir = os.path.join(fdir, INST_DIR_NAME); os.makedirs(idir, exist_ok=True)
     bdir = os.path.join(fdir, INST_BIN_DIR_NAME); os.makedirs(bdir, exist_ok=True)
-    for stale in glob.glob(os.path.join(idir, "instant_binary_composite_*.npy")):
+    for stale in (glob.glob(os.path.join(idir, "instant_binary_composite_*.npy"))
+                  + ([] if INSTANT_AREA else
+                     glob.glob(os.path.join(idir, "instant_front_inner_composite_*.npy"))
+                     + glob.glob(os.path.join(bdir, "instant_front_inner_composite_*.npy")))):
         os.remove(stale)        # binary composites now live in instantaneous_binarized/
     bgs = {p: _position_bg(fdir, p, F["positions"][p]) for p in ps}
     out = []
@@ -1120,10 +1191,26 @@ def finalize_instant(flame, F, fdir, positions):
                         "SYNTHETIC stitched front for visualisation only.",
                 "rows_top_to_bottom": [{"row_offset": b[0], "pos": b[1], "frame": b[2]}
                                        for b in bounds]}
+        FRrem = np.zeros_like(FR)
+        if INSTANT_AREA:
+            FRin, FRrem, notes = inner_front(FR, BI, NOZZLE_CENTER)
+            for n_ in notes:
+                warn(flame, f"instantaneous #{ci}: {n_}")
+            info["A_inst_mm2"] = round(front_revolution_area(FRin, NOZZLE_CENTER, SPATIAL_RES), 2)
+            info["A_inst_note"] = ("inner front only (outer product/air edge removed), "
+                                   "each side revolved 180° about NOZZLE_CENTER="
+                                   f"{NOZZLE_CENTER}; covers the measured positions only "
+                                   "(compare with A_real, not A_total)")
+            info["inner_front_warnings"] = notes
+            for d_ in (idir, bdir):
+                atomic_save_npy(os.path.join(d_, f"instant_front_inner_composite_{ci}.npy"), FRin)
+            FR = FRin
         for d_ in (idir, bdir):
             atomic_write_json(os.path.join(d_, f"instant_composite_{ci}_info.json"), info)
 
         FRd = cv2.dilate(FR.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+        FRremd = cv2.dilate(FRrem.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+        a_txt = (f"   A_inst = {info['A_inst_mm2']:.0f} mm²" if "A_inst_mm2" in info else "")
 
         def _annotate(ax, txt_color):
             ax.axvline(x=NOZZLE_CENTER, color='goldenrod', linestyle='--', linewidth=1, alpha=0.8)
@@ -1144,13 +1231,15 @@ def finalize_instant(flame, F, fdir, positions):
         im = ax.imshow(RAW, cmap=WHITE_RED, vmin=0, vmax=max(vmax, 1e-6),
                        aspect='equal', interpolation='nearest')
         ov = np.zeros(FR.shape + (4,), dtype=float)
+        ov[FRremd] = (0.55, 0.55, 0.55, 0.8)       # removed outer edge: grey
         ov[FRd] = (0.0, 0.25, 1.0, 1.0)
         ax.imshow(ov, aspect='equal', interpolation='nearest')
         _annotate(ax, 'black')
         cb = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
         cb.set_label('OH-PLIF signal, bg-subtracted [counts]', fontsize=9)
-        ax.set_title(f"{flame} — stitched instantaneous front #{ci}, raw signal "
-                     f"(synthetic: positions not simultaneous)", fontsize=9)
+        ax.set_title(f"{flame} — stitched instantaneous front #{ci}, raw signal{a_txt}\n"
+                     f"(synthetic: positions not simultaneous; grey = outer edge, not counted)",
+                     fontsize=9)
         ax.axis('off'); fig.tight_layout()
         fig.savefig(os.path.join(idir, f"instant_composite_{ci}.png"),
                     bbox_inches='tight', dpi=150)
@@ -1159,19 +1248,21 @@ def finalize_instant(flame, F, fdir, positions):
         # ── binarized version (as before)
         rgb = np.zeros(FR.shape + (3,), dtype=np.uint8)
         rgb[BI] = (70, 70, 70)
+        rgb[FRremd] = (120, 60, 60)                 # removed outer edge: dim red
         rgb[FRd] = (255, 40, 40)
         fig, ax = plt.subplots(1, 1, figsize=(10, FR.shape[0] / FR.shape[1] * 10), dpi=150)
         ax.imshow(rgb, aspect='equal', interpolation='nearest')
         _annotate(ax, 'cyan')
-        ax.set_title(f"{flame} — stitched instantaneous front #{ci}, binarized "
-                     f"(synthetic: positions not simultaneous)", fontsize=9)
+        ax.set_title(f"{flame} — stitched instantaneous front #{ci}, binarized{a_txt}\n"
+                     f"(synthetic: positions not simultaneous; dim red = outer edge, not counted)",
+                     fontsize=9)
         ax.axis('off'); fig.tight_layout()
         fig.savefig(os.path.join(bdir, f"instant_composite_{ci}.png"),
                     bbox_inches='tight', dpi=150)
         plt.close(fig)
         out.append(info)
         log(f"    instantaneous #{ci}: frames {info['frames_used']}  "
-            f"mismatch px {[round(c) for c in jc]}")
+            f"mismatch px {[round(c) for c in jc]}{a_txt}")
     return out
 
 
@@ -1268,8 +1359,19 @@ def results_header():
     return ["Condition"] + [A_hdr(lv) for lv in lv_sorted] + [h_hdr(lv) for lv in lv_sorted]
 
 
-def write_flame_excel(flame, fdir, positions, mans, cb):
+def instant_rows(inst):
+    return [[i["composite"], i.get("A_inst_mm2", ""),
+             ", ".join(f"{k}:{v}" for k, v in i["frames_used"].items()),
+             ", ".join(f"{v:.0f}" for v in i["junction_mismatch_px"].values())]
+            for i in (inst or [])]
+
+
+def write_flame_excel(flame, fdir, positions, mans, cb, inst=None):
     sheets = [("Results", results_header(), [results_row(flame, cb)])]
+    if inst and any("A_inst_mm2" in i for i in inst):
+        sheets.append(("Instantaneous", ["composite #", "A_inst [mm²] (measured part only)",
+                                         "frames used", "junction mismatch [px]"],
+                       instant_rows(inst)))
     rows = []
     for lv in sorted(CBAR_LEVELS):
         d = cb["levels"][str(lv)]
@@ -1322,8 +1424,6 @@ def finalize_flame(flame, F):
     if DO_CBAR:
         if all("cbar" in mans[p]["products"] for p in positions):
             result["cbar"] = finalize_cbar(flame, F, fdir, positions)
-            x = write_flame_excel(flame, fdir, positions, mans, result["cbar"])
-            log(f"    Excel → {x}")
         else:
             warn(flame, "c̄ results missing for some positions → no c-line output")
     if DO_INSTANT:
@@ -1331,6 +1431,9 @@ def finalize_flame(flame, F):
             result["instant"] = finalize_instant(flame, F, fdir, positions)
         else:
             warn(flame, "instantaneous fronts missing for some positions")
+    if result["cbar"]:
+        x = write_flame_excel(flame, fdir, positions, mans, result["cbar"], result["instant"])
+        log(f"    Excel → {x}")
     build_settings_log(flame, fdir, positions, mans)
     atomic_write_json(fres_path, result)
     atomic_write_json(os.path.join(fdir, "flame_done.json"),
@@ -1355,8 +1458,23 @@ def write_master(flames, results, status):
         st_rows.append([f, status.get(f, "?"), pos_list_str(flames[f]["positions"]),
                         str(flames[f]["gaps"] or ""), str(r.get("no_bg") or ""),
                         "; ".join(cbs), sum(1 for ff, _ in WARNINGS if ff == f)])
+    inst_rows = []
+    for f in flames:
+        r = results.get(f) or {}
+        vals = [i["A_inst_mm2"] for i in (r.get("instant") or []) if "A_inst_mm2" in i]
+        if vals:
+            a_real = ([round(r["cbar"]["levels"][str(lv)]["A_real"], 2)
+                       for lv in sorted(CBAR_LEVELS)] if r.get("cbar") else [])
+            inst_rows.append([f, round(float(np.mean(vals)), 2),
+                              round(float(np.std(vals)), 2), len(vals)] + vals
+                             + [""] * (N_INSTANT_COMPOSITES - len(vals)) + a_real)
+    extra = []
+    if inst_rows:
+        extra = [("Instantaneous A", ["Condition", "A_inst mean [mm²]", "A_inst std [mm²]", "n"]
+                  + [f"A_inst #{i} [mm²]" for i in range(1, N_INSTANT_COMPOSITES + 1)]
+                  + [f"A_real (c̄={lv}) [mm²]" for lv in sorted(CBAR_LEVELS)], inst_rows)]
     x = write_table(os.path.join(OUTDIR, "ALL_conditions_results.xlsx"),
-                    [("All conditions", results_header(), rows),
+                    [("All conditions", results_header(), rows)] + extra + [
                      ("Run status", ["Condition", "status", "positions", "missing positions",
                                      "positions without bg", "c-lines not closed",
                                      "# warnings this run"], st_rows)])
