@@ -15,6 +15,8 @@ DRY_RUN     = False    # True: only list flames / resume status, no processing
 # Test on a few flames first:
 MAX_FLAMES  = None     # e.g. 1 → only the first flame in the list; None = all flames
 ONLY_FLAMES = []       # e.g. ["CH4_Re15000_phi1"] → only flames whose name contains this
+EXCLUDE_FLAMES = []    # e.g. ["Re26992"] → skip flames whose name contains this
+DUPLICATE_POLICY = "average"   # same position recorded twice: "average", "newest" or "oldest"
 
 # Examples of other overrides:
 # NOZZLE_CENTER = 552

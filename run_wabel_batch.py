@@ -60,6 +60,11 @@ DRY_RUN                 = False  # True: only discover + resume scan, no process
 MAX_FLAMES              = None   # e.g. 1 → only the first flame (alphabetical); None = all
 ONLY_FLAMES             = []     # e.g. ["Re15000_phi1"] → only flames whose name contains
                                  # one of these texts; [] = no filter
+EXCLUDE_FLAMES          = []     # e.g. ["Re26992"] → skip flames whose name contains these
+DUPLICATE_POLICY        = "average"  # same flame+position recorded more than once:
+                                 # "average" = average all recordings
+                                 # "newest"  = use only the last day-folder's recording
+                                 # "oldest"  = use only the first day-folder's recording
 REBUILD_FINISHED_FLAMES = False  # True: redo composites/Excel of finished flames
 ALLOW_POSITION_GAPS     = False  # True: build composites even if e.g. pos3 missing
 MISSING_BG_ACTION       = "warn" # "warn": process without bg subtraction (logged)
@@ -642,13 +647,23 @@ def resolve_flames(raw):
             if not ent["data"]:
                 fw.append(f"pos{pos}: only a bg file, no data file → ignored")
                 continue
-            if len(ent["data"]) > 1:
-                fw.append(f"DUPLICATE pos{pos}: {len(ent['data'])} data files → c̄ is "
-                          f"AVERAGED over all of them: "
-                          + "; ".join(_rel(p) for p in ent["data"]))
+            data_files = sorted(ent["data"])
+            if len(data_files) > 1:
+                pol = str(DUPLICATE_POLICY).lower()
+                if pol in ("newest", "oldest"):
+                    keep = data_files[-1] if pol == "newest" else data_files[0]
+                    fw.append(f"DUPLICATE pos{pos}: {len(data_files)} recordings → using "
+                              f"{pol.upper()} only: {_rel(keep)}  (ignored: "
+                              + "; ".join(_rel(p) for p in data_files if p != keep) + ")")
+                    data_files = [keep]
+                else:
+                    fw.append(f"DUPLICATE pos{pos}: {len(data_files)} data files → c̄ is "
+                              f"AVERAGED over all of them: "
+                              + "; ".join(_rel(p) for p in data_files))
             bg = None
             if ent["bg"]:
-                ddir = os.path.dirname(ent["data"][0])
+                ddir = os.path.dirname(data_files[-1] if str(DUPLICATE_POLICY).lower() == "newest"
+                                       else data_files[0])
                 same = [b for b in ent["bg"] if os.path.dirname(b) == ddir]
                 cands = same or ent["bg"]
                 bg = sorted(cands)[0]
@@ -658,7 +673,7 @@ def resolve_flames(raw):
             else:
                 fw.append(f"pos{pos}: NO BACKGROUND FILE found "
                           f"(MISSING_BG_ACTION='{MISSING_BG_ACTION}')")
-            positions[pos] = {"data": sorted(ent["data"]), "bg": bg}
+            positions[pos] = {"data": data_files, "bg": bg}
         if not positions:
             continue
         folders = OrderedDict()
@@ -1310,8 +1325,10 @@ def main():
             warn(f, m)
     if not flames:
         log("ERROR: no flames found."); sys.exit(1)
-    if ONLY_FLAMES or MAX_FLAMES:
+    if ONLY_FLAMES or MAX_FLAMES or EXCLUDE_FLAMES:
         names = list(flames)
+        if EXCLUDE_FLAMES:
+            names = [f for f in names if not any(t.lower() in f.lower() for t in EXCLUDE_FLAMES)]
         if ONLY_FLAMES:
             names = [f for f in names if any(t.lower() in f.lower() for t in ONLY_FLAMES)]
         if MAX_FLAMES:
@@ -1319,7 +1336,8 @@ def main():
         if not names:
             log(f"ERROR: no flame matches ONLY_FLAMES={ONLY_FLAMES}."); sys.exit(1)
         flames = OrderedDict((f, flames[f]) for f in names)
-        log(f"\n  >>> LIMITED RUN (ONLY_FLAMES={ONLY_FLAMES}, MAX_FLAMES={MAX_FLAMES}): "
+        log(f"\n  >>> LIMITED RUN (ONLY_FLAMES={ONLY_FLAMES}, EXCLUDE_FLAMES={EXCLUDE_FLAMES}, "
+            f"MAX_FLAMES={MAX_FLAMES}): "
             f"processing {len(flames)} flame(s): {', '.join(flames)}")
     log(f"  Total .spe data: {total_bytes / 1e9:.1f} GB")
 
