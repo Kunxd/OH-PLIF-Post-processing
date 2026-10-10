@@ -117,7 +117,7 @@ try:
 except ImportError:
     _CONFIG_LOCAL = None
 
-SCRIPT_VERSION = "v8.1"
+SCRIPT_VERSION = "v8.2"
 
 # Settings baked into per-position products (logged, never auto-invalidated)
 PROCESSING_KEYS = ["SPATIAL_RES", "CROP_BOTTOM_MM", "CROP_TOP_MM", "NOISE_FLOOR",
@@ -1026,7 +1026,7 @@ def read_raw_instant_frame(ent, g, bg):
 
 
 WHITE_RED = LinearSegmentedColormap.from_list(
-    "white_red", ["#ffffff", "#fcbba1", "#fb6a4a", "#cb181d", "#67000d"])
+    "white_red", ["#ffffff", "#ffb3b3", "#ff4d4d", "#ff0000", "#dd0000"])
 
 
 def _edge_masks(bins, top):
