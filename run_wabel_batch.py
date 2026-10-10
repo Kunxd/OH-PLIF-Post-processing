@@ -1311,35 +1311,42 @@ def main():
     # ── discovery ────────────────────────────────────────────────────
     raw, ignored = discover(INPUT_DIR)
     flames = resolve_flames(raw)
-    log(f"\n{'=' * 72}\nDISCOVERY: {len(flames)} flames found")
+    if not flames:
+        log("ERROR: no flames found."); sys.exit(1)
+    # which flames are selected for this run
+    names = list(flames)
+    if EXCLUDE_FLAMES:
+        names = [f for f in names if not any(t.lower() in f.lower() for t in EXCLUDE_FLAMES)]
+    if ONLY_FLAMES:
+        names = [f for f in names if any(t.lower() in f.lower() for t in ONLY_FLAMES)]
+    if MAX_FLAMES:
+        names = names[:int(MAX_FLAMES)]
+    if not names:
+        log(f"ERROR: no flame left after ONLY_FLAMES={ONLY_FLAMES} / "
+            f"EXCLUDE_FLAMES={EXCLUDE_FLAMES} / MAX_FLAMES={MAX_FLAMES}."); sys.exit(1)
+    limited = len(names) < len(flames)
+
+    log(f"\n{'=' * 72}\nDISCOVERY: {len(flames)} flames found, "
+        f"{len(names)} selected for this run")
     for p in ignored:
         warn("discovery", f"file name not understood (no 'pos<N>') → ignored: {p}")
     total_bytes = 0
     for f, F in flames.items():
-        for e in F["positions"].values():
-            total_bytes += sum(os.path.getsize(p) for p in e["data"])
-            if e["bg"]: total_bytes += os.path.getsize(e["bg"])
-        log(f"  • {f}   D={F['D']} mm   {pos_list_str(F['positions'])}   "
-            f"[folder: {', '.join(F['folders'])}]")
-        for m in F["disc_warnings"]:
-            warn(f, m)
-    if not flames:
-        log("ERROR: no flames found."); sys.exit(1)
-    if ONLY_FLAMES or MAX_FLAMES or EXCLUDE_FLAMES:
-        names = list(flames)
-        if EXCLUDE_FLAMES:
-            names = [f for f in names if not any(t.lower() in f.lower() for t in EXCLUDE_FLAMES)]
-        if ONLY_FLAMES:
-            names = [f for f in names if any(t.lower() in f.lower() for t in ONLY_FLAMES)]
-        if MAX_FLAMES:
-            names = names[:int(MAX_FLAMES)]
-        if not names:
-            log(f"ERROR: no flame matches ONLY_FLAMES={ONLY_FLAMES}."); sys.exit(1)
-        flames = OrderedDict((f, flames[f]) for f in names)
+        sel = f in names
+        if sel:
+            for e in F["positions"].values():
+                total_bytes += sum(os.path.getsize(p) for p in e["data"])
+                if e["bg"]: total_bytes += os.path.getsize(e["bg"])
+        log(f"  {'•' if sel else '-'} {f}   D={F['D']} mm   {pos_list_str(F['positions'])}   "
+            f"[folder: {', '.join(F['folders'])}]" + ("" if sel else "   (not in this run)"))
+        if sel:                      # warnings only for flames that are processed
+            for m in F["disc_warnings"]:
+                warn(f, m)
+    flames = OrderedDict((f, flames[f]) for f in names)
+    if limited:
         log(f"\n  >>> LIMITED RUN (ONLY_FLAMES={ONLY_FLAMES}, EXCLUDE_FLAMES={EXCLUDE_FLAMES}, "
-            f"MAX_FLAMES={MAX_FLAMES}): "
-            f"processing {len(flames)} flame(s): {', '.join(flames)}")
-    log(f"  Total .spe data: {total_bytes / 1e9:.1f} GB")
+            f"MAX_FLAMES={MAX_FLAMES}): processing {len(flames)} flame(s): {', '.join(flames)}")
+    log(f"  Total .spe data (selected flames): {total_bytes / 1e9:.1f} GB")
 
     # ── resume scan ──────────────────────────────────────────────────
     log(f"\n{'=' * 72}\nRESUME SCAN")
