@@ -41,6 +41,7 @@ import os
 import sys
 import csv
 import glob
+import re
 import argparse
 import numpy as np
 from scipy.ndimage import binary_fill_holes, label, binary_closing
@@ -223,7 +224,14 @@ def _collect_sources(results, flame_filter=None):
     def ok(f):
         return skip not in f and (not flame_filter or flame_filter.lower() in f.lower())
     def flame_of(f):
-        return os.path.relpath(f, results).split(os.sep)[0]
+        """Flame folder of a file, as a path relative to the searched folder
+        (e.g. 'Run1/OH_D12_…' if the folder above Run1 was given)."""
+        parts = os.path.relpath(os.path.dirname(f), results).split(os.sep)
+        for i, x in enumerate(parts):
+            if re.fullmatch(r"pos\d+", x) or x.startswith(("threshold_", "instantaneous")):
+                parts = parts[:i]
+                break
+        return "/".join(parts) or os.path.basename(os.path.abspath(results))
 
     out = []
     npz = sorted(f for f in glob.glob(os.path.join(results, "**", "instant_fronts*.npz"),
@@ -249,7 +257,7 @@ def _collect_sources(results, flame_filter=None):
         rel = os.path.relpath(os.path.dirname(f), results).split(os.sep)
         tag = next((x.replace("threshold_", "t") for x in rel if x.startswith("threshold_")), "")
         n = os.path.basename(f)[len("instant_binary_composite_"):-4]
-        groups.setdefault((rel[0], tag), []).append((f"composite{n}", f))
+        groups.setdefault((flame_of(f), tag), []).append((f"composite{n}", f))
     for (flame, tag), items in sorted(groups.items()):
         out.append((flame, "stitched", tag, len(items),
                     (lambda items=items: [(fid, np.load(f).astype(bool)) for fid, f in items])))
@@ -305,7 +313,7 @@ def real_frames(results, outdir, flame_filter=None, close_px=0, max_plots=3, min
         for i in dict.fromkeys(pick):
             fid, img = frames[i]
             core, proc = isolate_inner_core(img, close_gaps_px=close_px)   # recompute for plot
-            fn = f"{flame}_{pos}{'_' + tag if tag else ''}_{fid}.png"
+            fn = f"{flame.replace('/', '__')}_{pos}{'_' + tag if tag else ''}_{fid}.png"
             validate_visually(img, core, proc, os.path.join(outdir, fn),
                               f"{flame} {pos} {fid}  close_gaps_px={close_px}")
         del frames
