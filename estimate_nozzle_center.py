@@ -20,6 +20,9 @@ with height).  A check image is saved in each flame folder.
 Usage (in the repo folder):
     python3 estimate_nozzle_center.py                  # uses OUTDIR from config_local.py
     python3 estimate_nozzle_center.py /path/to/results # any results folder (also old v7 output)
+    python3 estimate_nozzle_center.py /path/to/results 0.30   # use the 30 % threshold c̄ maps
+With several thresholds, the c̄ maps of the first one in THRESHOLD_FRAC are used
+unless a threshold is given.
 """
 import os, sys, re, glob, csv, math
 import numpy as np
@@ -34,12 +37,22 @@ MAX_ITER       = 10
 WARN_SHIFT_PX  = 5      # flag flames whose centre differs more than this from NOZZLE_CENTER
 
 
+CBAR_NAME = "cbar.npy"    # set in main(): cbar_t25.npy etc. (v8.4+), cbar.npy (older)
+
+
+def _cbar_path(posdir):
+    for name in (CBAR_NAME, "cbar.npy"):
+        f = os.path.join(posdir, name)
+        if os.path.isfile(f):
+            return f
+    return None
+
+
 def find_flame_dirs(root):
-    """Folders that contain pos<N>/cbar.npy (works for v8 and old v7 output)."""
+    """Folders that contain pos<N>/cbar*.npy (v8.4 per-threshold, older v8 and v7 output)."""
     found = []
     for d, subdirs, files in os.walk(root):
-        if any(re.fullmatch(r"pos\d+", s) and os.path.isfile(os.path.join(d, s, "cbar.npy"))
-               for s in subdirs):
+        if any(re.fullmatch(r"pos\d+", s) and _cbar_path(os.path.join(d, s)) for s in subdirs):
             found.append(d)
     return sorted(found)
 
@@ -47,8 +60,8 @@ def find_flame_dirs(root):
 def load_stack(fdir):
     pos = sorted(int(m.group(1)) for s in os.listdir(fdir)
                  for m in [re.fullmatch(r"pos(\d+)", s)]
-                 if m and os.path.isfile(os.path.join(fdir, s, "cbar.npy")))
-    maps = {p: np.load(os.path.join(fdir, f"pos{p}", "cbar.npy")) for p in pos}
+                 if m and _cbar_path(os.path.join(fdir, s)))
+    maps = {p: np.load(_cbar_path(os.path.join(fdir, f"pos{p}"))) for p in pos}
     widths = {m.shape[1] for m in maps.values()}
     if len(widths) > 1:
         raise ValueError(f"positions have different widths {widths}")
@@ -109,7 +122,11 @@ def save_check_image(fdir, stack, bounds, nc_old, nc_new, mp, path):
 
 
 def main():
+    global CBAR_NAME
     root = sys.argv[1] if len(sys.argv) > 1 else W.OUTDIR
+    t = float(sys.argv[2]) if len(sys.argv) > 2 else W.thresholds()[0]
+    CBAR_NAME = f"cbar_{W.thr_tag(t)}.npy"
+    print(f"c̄ maps       : {CBAR_NAME} (threshold {W.thr_pct(t)} %), or cbar.npy for older results")
     if not os.path.isdir(root):
         print(f"ERROR: folder not found: {root}"); sys.exit(1)
     nc0 = W.NOZZLE_CENTER; res = W.SPATIAL_RES
@@ -119,7 +136,7 @@ def main():
           f"{int(IGNORE_TOP * 100)} % near the tip ignored)")
     print(f"Flames found   : {len(flames)}\n")
     if not flames:
-        print("No folders with pos*/cbar.npy found."); sys.exit(1)
+        print("No folders with pos*/cbar*.npy found."); sys.exit(1)
 
     rows = []
     hdr = f"{'flame':<40} {'centre':>7} {'shift':>7} {'shift':>7} {'tilt':>7}   per position"

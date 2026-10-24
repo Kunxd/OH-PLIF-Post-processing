@@ -92,7 +92,8 @@ CROP_BOTTOM_MM  = 7.75
 CROP_TOP_MM     = 1.0
 NOISE_FLOOR     = 10
 WINDOW_SIZE     = 51
-THRESHOLD_FRAC  = 0.25
+THRESHOLD_FRAC  = 0.25   # one value, or several: [0.25, 0.30] → everything is
+                         # computed per threshold and grouped in the Excel files
 N_ITER          = 4
 MORPH_CLOSE     = 3
 MORPH_OPEN      = 3
@@ -124,7 +125,7 @@ try:
 except ImportError:
     _CONFIG_LOCAL = None
 
-SCRIPT_VERSION = "v8.3"
+SCRIPT_VERSION = "v8.4"
 
 # Settings baked into per-position products (logged, never auto-invalidated)
 PROCESSING_KEYS = ["SPATIAL_RES", "CROP_BOTTOM_MM", "CROP_TOP_MM", "NOISE_FLOOR",
@@ -133,7 +134,7 @@ PROCESSING_KEYS = ["SPATIAL_RES", "CROP_BOTTOM_MM", "CROP_TOP_MM", "NOISE_FLOOR"
 INSTANT_KEYS    = ["N_INSTANT", "NOZZLE_CENTER", "N_BIGGEST", "MIN_CONTOUR_PX"]
 # Settings applied at flame level (cheap, recomputed when changed)
 ANALYSIS_KEYS   = ["DO_CBAR", "DO_INSTANT", "CBAR_LEVELS", "CLOSE_THRESHOLD",
-                   "NOZZLE_CENTER", "POS1_OFFSET_MM", "SPATIAL_RES",
+                   "NOZZLE_CENTER", "POS1_OFFSET_MM", "SPATIAL_RES", "THRESHOLD_FRAC",
                    "NOZZLE_DIAM_FALLBACK_MM", "ALLOW_POSITION_GAPS",
                    "N_INSTANT_COMPOSITES", "STITCH_BAND_PX", "MARK_FLAME_HEIGHT",
                    "INSTANT_AREA", "GAP_CLOSE_PX", "MIN_POCKET_AREA_PX", "FRONT_SMOOTH_PX"]
@@ -148,9 +149,45 @@ def current_settings(keys):
     return OrderedDict((k, g[k]) for k in keys)
 
 
+# ── thresholds: each binarization threshold is a separate "variant" ──
+def thresholds():
+    t = THRESHOLD_FRAC
+    lst = list(t) if isinstance(t, (list, tuple)) else [t]
+    return sorted(dict.fromkeys(float(x) for x in lst))
+
+
+def thr_pct(t):   return f"{t * 100:g}"                # 0.25 → "25"
+def thr_tag(t):   return f"t{thr_pct(t)}"              # "t25"
+def thr_label(t): return f"Threshold {thr_pct(t)}%"
+def thr_dir(fdir, t): return os.path.join(fdir, f"threshold_{thr_pct(t)}")
+def prod_key(kind, t): return f"{kind}_{thr_tag(t)}"   # "cbar_t25", "instant_t25"
+def cbar_file(pd, t):  return os.path.join(pd, f"cbar_{thr_tag(t)}.npy")
+def inst_file(pd, t):  return os.path.join(pd, f"instant_fronts_{thr_tag(t)}.npz")
+
+
+def parse_prod(key):
+    """'cbar_t25' → ('cbar', 0.25);  legacy 'cbar' → ('cbar', None)."""
+    if "_t" in key:
+        kind, tag = key.split("_t", 1)
+        return kind, float(tag) / 100.0
+    return key, None
+
+
 def product_settings(product):
-    keys = PROCESSING_KEYS + (INSTANT_KEYS if product == "instant" else [])
-    return current_settings(keys)
+    kind, t = parse_prod(product)
+    keys = PROCESSING_KEYS + (INSTANT_KEYS if kind == "instant" else [])
+    st = current_settings(keys)
+    st["THRESHOLD_FRAC"] = t if t is not None else thresholds()[0]
+    return st
+
+
+def needs_str(needs):
+    parts = []
+    for kind, name in (("cbar", "c̄"), ("instant", "inst")):
+        ts = [parse_prod(n)[1] for n in needs if parse_prod(n)[0] == kind]
+        if ts:
+            parts.append(f"{name} " + ",".join(f"{thr_pct(t)}%" for t in ts if t is not None))
+    return " + ".join(parts)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -218,12 +255,15 @@ def crop_frame(frame):
     return frame[t:b] if b > t else frame
 
 
-def binary_u8(img):
-    """v7 make_binary / detect_contours preprocessing → uint8 0/255."""
+def binary_u8(img, frac=None):
+    """v7 make_binary / detect_contours preprocessing → uint8 0/255.
+    frac = Wabel threshold fraction (default: first of THRESHOLD_FRAC)."""
+    if frac is None:
+        frac = thresholds()[0]
     work = img.astype(np.float64)
     fl = NOISE_FLOOR / 100.0 * work.max(); work[work < fl] = 0.0
     bi = wabel_local_threshold(work.clip(0, 255).astype(np.uint8),
-                               WINDOW_SIZE, THRESHOLD_FRAC, N_ITER)
+                               WINDOW_SIZE, frac, N_ITER)
     u8 = bi.astype(np.uint8) * 255
     if MORPH_CLOSE > 0:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MORPH_CLOSE, MORPH_CLOSE))
@@ -520,8 +560,11 @@ def process_position(job):
     W = res["warnings"]
     try:
         pd = job["pos_dir"]; os.makedirs(pd, exist_ok=True)
-        need_cbar = "cbar" in job["needs"]
-        need_inst = "instant" in job["needs"]
+        cbar_ts = [parse_prod(n)[1] for n in job["needs"] if parse_prod(n)[0] == "cbar"]
+        inst_ts = [parse_prod(n)[1] for n in job["needs"] if parse_prod(n)[0] == "instant"]
+        all_ts = sorted(set(cbar_ts) | set(inst_ts))
+        need_cbar = bool(cbar_ts)
+        need_inst = bool(inst_ts)
 
         bg = None
         if job["bg_path"]:
@@ -537,8 +580,9 @@ def process_position(job):
         else:
             limit = N_INSTANT if MAX_FRAMES is None else min(N_INSTANT, MAX_FRAMES)
 
-        bsum = None; n_used = 0; n_empty = 0; n_full = 0; skipped = 0
-        fronts, bins, fidx = [], [], []
+        bsum = {t: None for t in cbar_ts}; n_used = 0; skipped = 0
+        n_empty = {t: 0 for t in all_ts}; n_full = {t: 0 for t in all_ts}
+        fronts = {t: [] for t in inst_ts}; bins = {t: [] for t in inst_ts}; fidx = []
         for spe in job["spe_paths"]:
             remaining = None if limit is None else limit - n_used
             if remaining is not None and remaining <= 0:
@@ -566,22 +610,26 @@ def process_position(job):
                 for j in range(arr.shape[0]):
                     g = n_used + i0 + j
                     img = to_uint8(crop_frame(arr[j]))
-                    u8 = binary_u8(img); bi = u8 > 0
-                    if need_cbar:
-                        if bsum is None:
-                            bsum = np.zeros(bi.shape, dtype=np.float64)
-                        bsum += bi
-                    fr = bi.mean()
-                    if fr < 0.001: n_empty += 1
-                    elif fr > 0.999: n_full += 1
-                    if need_inst and len(fronts) < N_INSTANT:
-                        fronts.append(front_from_u8(u8)); bins.append(bi); fidx.append(g)
-                    if g < OVERLAY_COUNT:
-                        if SAVE_OVERLAY:
-                            save_overlay(img, front_from_u8(u8),
-                                         os.path.join(pd, f"overlay_{g:04d}.png"))
-                        if SAVE_DEBUG_BINARY:
-                            cv2.imwrite(os.path.join(pd, f"binary_{g:04d}.png"), u8)
+                    take_inst = need_inst and len(fidx) < N_INSTANT
+                    if take_inst:
+                        fidx.append(g)
+                    for t in all_ts:                     # one binarization per threshold
+                        u8 = binary_u8(img, t); bi = u8 > 0
+                        if t in bsum:
+                            if bsum[t] is None:
+                                bsum[t] = np.zeros(bi.shape, dtype=np.float64)
+                            bsum[t] += bi
+                        fr = bi.mean()
+                        if fr < 0.001: n_empty[t] += 1
+                        elif fr > 0.999: n_full[t] += 1
+                        if take_inst and t in fronts:
+                            fronts[t].append(front_from_u8(u8)); bins[t].append(bi)
+                        if g < OVERLAY_COUNT:
+                            if SAVE_OVERLAY:
+                                save_overlay(img, front_from_u8(u8),
+                                             os.path.join(pd, f"overlay_{thr_tag(t)}_{g:04d}.png"))
+                            if SAVE_DEBUG_BINARY:
+                                cv2.imwrite(os.path.join(pd, f"binary_{thr_tag(t)}_{g:04d}.png"), u8)
             n_used += info["n_frames"]
 
         if n_used == 0:
@@ -589,28 +637,32 @@ def process_position(job):
         res["n_frames"] = n_used
         if need_cbar and MAX_FRAMES is None and n_used != EXPECTED_FRAMES:
             W.append(f"{n_used} frames used for c̄ (expected {EXPECTED_FRAMES})")
-        if n_empty:
-            W.append(f"{n_empty}/{n_used} frames have an (almost) EMPTY binary "
-                     f"(<0.1 % burnt) — check signal / threshold")
-        if n_full:
-            W.append(f"{n_full}/{n_used} frames are >99.9 % 'burnt' — check bg / threshold")
+        for t in all_ts:
+            pre = f"[thr {thr_pct(t)}%] " if len(all_ts) > 1 else ""
+            if n_empty[t]:
+                W.append(f"{pre}{n_empty[t]}/{n_used} frames have an (almost) EMPTY binary "
+                         f"(<0.1 % burnt) — check signal / threshold")
+            if n_full[t]:
+                W.append(f"{pre}{n_full[t]}/{n_used} frames are >99.9 % 'burnt' — check bg / threshold")
 
         now = datetime.datetime.now().isoformat(timespec="seconds")
         products = dict(job["keep_products"])
-        if need_cbar:
-            atomic_save_npy(os.path.join(pd, "cbar.npy"), bsum / n_used)
-            products["cbar"] = {"settings": product_settings("cbar"), "finished": now,
-                                "n_frames": n_used, "skipped_leading": skipped}
-        if need_inst:
-            tmp = os.path.join(pd, "instant_fronts.npz.tmp")
+        for t in cbar_ts:
+            atomic_save_npy(cbar_file(pd, t), bsum[t] / n_used)
+            k = prod_key("cbar", t)
+            products[k] = {"settings": product_settings(k), "finished": now,
+                           "n_frames": n_used, "skipped_leading": skipped}
+        for t in inst_ts:
+            tmp = inst_file(pd, t) + ".tmp"
             with open(tmp, "wb") as f:
-                np.savez_compressed(f, fronts=np.array(fronts, dtype=bool),
-                                    binaries=np.array(bins, dtype=bool),
+                np.savez_compressed(f, fronts=np.array(fronts[t], dtype=bool),
+                                    binaries=np.array(bins[t], dtype=bool),
                                     frame_index=np.array(fidx, dtype=np.int32))
-            os.replace(tmp, os.path.join(pd, "instant_fronts.npz"))
-            products["instant"] = {"settings": product_settings("instant"), "finished": now,
-                                   "n_frames": len(fronts), "n_requested": N_INSTANT,
-                                   "skipped_leading": skipped}
+            os.replace(tmp, inst_file(pd, t))
+            k = prod_key("instant", t)
+            products[k] = {"settings": product_settings(k), "finished": now,
+                           "n_frames": len(fronts[t]), "n_requested": N_INSTANT,
+                           "skipped_leading": skipped}
         man = {"flame": job["flame"], "pos": job["pos"], "sources": job["sources"],
                "products": products, "script_version": SCRIPT_VERSION}
         write_position_settings_txt(os.path.join(pd, f"settings_pos{job['pos']}.txt"), man)
@@ -732,10 +784,35 @@ def settings_diff(old, new):
             for k in new if old.get(k) != new.get(k)]
 
 
+def _migrate_legacy(pd, man):
+    """Pre-v8.4 results (one threshold): cbar.npy / instant_fronts.npz and
+    products 'cbar' / 'instant' → renamed to the per-threshold names."""
+    prods = man.get("products", {})
+    changed = False
+    for kind, old, newf in (("cbar", "cbar.npy", cbar_file),
+                            ("instant", "instant_fronts.npz", inst_file)):
+        if kind in prods:
+            t = prods[kind]["settings"].get("THRESHOLD_FRAC")
+            if isinstance(t, (list, tuple)) or t is None:
+                continue
+            src = os.path.join(pd, old)
+            if os.path.isfile(src) and not os.path.isfile(newf(pd, t)):
+                os.replace(src, newf(pd, t))
+            prods[prod_key(kind, float(t))] = prods.pop(kind)
+            changed = True
+    if changed:
+        man["products"] = prods
+        atomic_write_json(os.path.join(pd, "done.json"), man)
+        write_position_settings_txt(os.path.join(pd, f"settings_pos{man['pos']}.txt"), man)
+    return man
+
+
 def plan_position(flame_dir, pos, ent):
     """Return (needs, keep_products, notes)."""
     pd = os.path.join(flame_dir, f"pos{pos}")
     man = load_json(os.path.join(pd, "done.json"))
+    if man is not None:
+        man = _migrate_legacy(pd, man)
     sig = json.loads(json.dumps(source_sig(ent)))
     notes = []
     valid = {}
@@ -745,29 +822,34 @@ def plan_position(flame_dir, pos, ent):
         else:
             notes.append("source files changed since last run → reprocess")
     needs, keep = [], {}
-    if DO_CBAR:
-        p = valid.get("cbar")
-        if p and os.path.isfile(os.path.join(pd, "cbar.npy")):
-            keep["cbar"] = p
-            d = settings_diff(p["settings"], product_settings("cbar"))
-            if d:
-                notes.append("c̄ done with different settings (NOT reprocessed): " + "; ".join(d))
-        else:
-            needs.append("cbar")
-    if DO_INSTANT:
-        p = valid.get("instant")
-        if (p and os.path.isfile(os.path.join(pd, "instant_fronts.npz"))
-                and p.get("n_requested", 0) >= N_INSTANT):
-            keep["instant"] = p
-        else:
-            needs.append("instant")
-    # keep products not requested this run (e.g. instant while DO_INSTANT off)
+    for t in thresholds():
+        if DO_CBAR:
+            k = prod_key("cbar", t); p = valid.get(k)
+            if p and os.path.isfile(cbar_file(pd, t)):
+                keep[k] = p
+                d = settings_diff(p["settings"], product_settings(k))
+                if d:
+                    notes.append(f"c̄ ({thr_pct(t)}%) done with different settings "
+                                 "(NOT reprocessed): " + "; ".join(d))
+            else:
+                needs.append(k)
+        if DO_INSTANT:
+            k = prod_key("instant", t); p = valid.get(k)
+            if (p and os.path.isfile(inst_file(pd, t))
+                    and p.get("n_requested", 0) >= N_INSTANT):
+                keep[k] = p
+            else:
+                needs.append(k)
+    # keep products not requested this run (other thresholds, instant while off, …)
     for k, v in valid.items():
-        if k not in keep and k not in needs:
-            if k == "cbar" and os.path.isfile(os.path.join(pd, "cbar.npy")):
-                keep[k] = v
-            if k == "instant" and os.path.isfile(os.path.join(pd, "instant_fronts.npz")):
-                keep[k] = v
+        if k in keep or k in needs:
+            continue
+        kind, t = parse_prod(k)
+        if t is None:
+            continue
+        f = cbar_file(pd, t) if kind == "cbar" else inst_file(pd, t)
+        if os.path.isfile(f):
+            keep[k] = v
     return needs, keep, notes
 
 
@@ -912,8 +994,9 @@ SCAN_MSG = {
 }
 
 
-def finalize_cbar(flame, F, fdir, positions):
-    pcb = {p: np.load(os.path.join(fdir, f"pos{p}", "cbar.npy")) for p in positions}
+def finalize_cbar(flame, F, fdir, positions, t):
+    pre = f"[thr {thr_pct(t)}%] " if len(thresholds()) > 1 else ""
+    pcb = {p: np.load(cbar_file(os.path.join(fdir, f"pos{p}"), t)) for p in positions}
     widths = {p: a.shape[1] for p, a in pcb.items()}
     if len(set(widths.values())) > 1:
         raise ValueError(f"positions have different image widths {widths}")
@@ -925,8 +1008,9 @@ def finalize_cbar(flame, F, fdir, positions):
         for p in positions:
             cs = {lv: scan_cbar_contour(pcb[p], NOZZLE_CENTER, lv) for lv in CBAR_LEVELS}
             tips = contour_flame_height(cs, pcb[p].shape[0], SPATIAL_RES)
-            draw_cbar(pcb[p], cs, tips, os.path.join(fdir, f"pos{p}", "cbar_map.png"),
-                      pos_label=f"pos{p}")
+            draw_cbar(pcb[p], cs, tips,
+                      os.path.join(fdir, f"pos{p}", f"cbar_map_{thr_tag(t)}.png"),
+                      pos_label=f"pos{p}  ({thr_label(t)})")
 
     C = build_cbar_composite(pcb, F["D"])
     if C["ext_px"] == 0 and POS1_OFFSET_MM > 0:
@@ -937,17 +1021,17 @@ def finalize_cbar(flame, F, fdir, positions):
         inf = C["scaninfo"][lv]
         lv_status[lv] = inf["status"]
         if inf["status"] in SCAN_MSG:
-            warn(flame, f"c̄={lv}: {SCAN_MSG[inf['status']]}")
+            warn(flame, f"{pre}c̄={lv}: {SCAN_MSG[inf['status']]}")
         if inf["rows"] and inf["single_side_rows"] > 0.05 * inf["rows"]:
-            warn(flame, f"c̄={lv}: {inf['single_side_rows']} of {inf['rows']} rows have a "
+            warn(flame, f"{pre}c̄={lv}: {inf['single_side_rows']} of {inf['rows']} rows have a "
                         f"crossing on ONE side only — asymmetric/clipped flame?")
         a = C["areas"][lv]; h = C["tips"][lv][0]
         log(f"    c̄={lv}: A_real={a[0]:.1f}  A_ext={a[1]:.1f}  A_total={a[2]:.1f} mm²  "
             f"h={h:.1f} mm  [{inf['status']}]")
 
-    ad = os.path.join(fdir, AVG_DIR_NAME); os.makedirs(ad, exist_ok=True)
-    base_t = (f"{flame}  (pos{min(positions)} bottom → pos{max(positions)} top, "
-              f"NOZZLE_CENTER={NOZZLE_CENTER})")
+    ad = os.path.join(thr_dir(fdir, t), AVG_DIR_NAME); os.makedirs(ad, exist_ok=True)
+    base_t = (f"{flame}  {thr_label(t)}  (pos{min(positions)} bottom → pos{max(positions)} "
+              f"top, NOZZLE_CENTER={NOZZLE_CENTER})")
     plot_avg_composite(C, [], os.path.join(ad, "composite_no_clines.png"), base_t)
     for lv in CBAR_LEVELS:
         plot_avg_composite(C, [lv], os.path.join(ad, f"composite_cbar_{lv}.png"),
@@ -959,6 +1043,7 @@ def finalize_cbar(flame, F, fdir, positions):
     atomic_save_npy(os.path.join(ad, "cbar_composite.npy"), C["composite"])
     H = C["composite"].shape[0]
     d = {"levels": np.array(CBAR_LEVELS, dtype=float),
+         "threshold_frac": np.array(t),
          "nozzle_center_px": np.array(NOZZLE_CENTER),
          "spatial_res_mm": np.array(SPATIAL_RES),
          "composite_h_real_px": np.array(C["h_real"]),
@@ -1122,10 +1207,11 @@ def _best_chain(costs, avail):
     return chain
 
 
-def finalize_instant(flame, F, fdir, positions):
+def finalize_instant(flame, F, fdir, positions, t):
+    pre = f"[thr {thr_pct(t)}%] " if len(thresholds()) > 1 else ""
     data = {}
     for p in positions:
-        z = np.load(os.path.join(fdir, f"pos{p}", "instant_fronts.npz"))
+        z = np.load(inst_file(os.path.join(fdir, f"pos{p}"), t))
         data[p] = (z["fronts"], z["binaries"], z["frame_index"])
     widths = {p: d[0].shape[2] for p, d in data.items()}
     if len(set(widths.values())) > 1:
@@ -1140,8 +1226,8 @@ def finalize_instant(flame, F, fdir, positions):
         costs.append(L.sum(1)[:, None] + U.sum(1)[None, :] - 2.0 * (L @ U.T))
     avail = [np.ones(data[p][0].shape[0], dtype=bool) for p in ps]
 
-    idir = os.path.join(fdir, INST_DIR_NAME); os.makedirs(idir, exist_ok=True)
-    bdir = os.path.join(fdir, INST_BIN_DIR_NAME); os.makedirs(bdir, exist_ok=True)
+    idir = os.path.join(thr_dir(fdir, t), INST_DIR_NAME); os.makedirs(idir, exist_ok=True)
+    bdir = os.path.join(thr_dir(fdir, t), INST_BIN_DIR_NAME); os.makedirs(bdir, exist_ok=True)
     for stale in (glob.glob(os.path.join(idir, "instant_binary_composite_*.npy"))
                   + ([] if INSTANT_AREA else
                      glob.glob(os.path.join(idir, "instant_front_inner_composite_*.npy"))
@@ -1152,7 +1238,7 @@ def finalize_instant(flame, F, fdir, positions):
     for ci in range(1, N_INSTANT_COMPOSITES + 1):
         chain = _best_chain(costs, avail)
         if chain is None:
-            warn(flame, f"instantaneous: only {ci - 1} composites possible "
+            warn(flame, f"{pre}instantaneous: only {ci - 1} composites possible "
                         f"(not enough frames per position)")
             break
         for k, a in enumerate(chain):
@@ -1182,7 +1268,7 @@ def finalize_instant(flame, F, fdir, positions):
             atomic_save_npy(os.path.join(d_, f"instant_front_composite_{ci}.npy"), FR)
         atomic_save_npy(os.path.join(bdir, f"instant_binary_composite_{ci}.npy"), BI)
         atomic_save_npy(os.path.join(idir, f"instant_raw_composite_{ci}.npy"), RAW)
-        info = {"flame": flame, "composite": ci,
+        info = {"flame": flame, "composite": ci, "threshold_frac": t,
                 "frames_used": {f"pos{p}": int(data[p][2][chain[k]]) for k, p in enumerate(ps)},
                 "source_frames": srcs,
                 "junction_mismatch_px": {f"pos{ps[k]}|pos{ps[k + 1]}": jc[k]
@@ -1195,7 +1281,7 @@ def finalize_instant(flame, F, fdir, positions):
         if INSTANT_AREA:
             FRin, FRrem, notes = inner_front(FR, BI, NOZZLE_CENTER)
             for n_ in notes:
-                warn(flame, f"instantaneous #{ci}: {n_}")
+                warn(flame, f"{pre}instantaneous #{ci}: {n_}")
             info["A_inst_mm2"] = round(front_revolution_area(FRin, NOZZLE_CENTER, SPATIAL_RES), 2)
             info["A_inst_note"] = ("inner front only (outer product/air edge removed), "
                                    "each side revolved 180° about NOZZLE_CENTER="
@@ -1237,7 +1323,7 @@ def finalize_instant(flame, F, fdir, positions):
         _annotate(ax, 'black')
         cb = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
         cb.set_label('OH-PLIF signal, bg-subtracted [counts]', fontsize=9)
-        ax.set_title(f"{flame} — stitched instantaneous front #{ci}, raw signal{a_txt}\n"
+        ax.set_title(f"{flame} — {thr_label(t)} — stitched instantaneous front #{ci}, raw signal{a_txt}\n"
                      f"(synthetic: positions not simultaneous; grey = outer edge, not counted)",
                      fontsize=9)
         ax.axis('off'); fig.tight_layout()
@@ -1253,7 +1339,7 @@ def finalize_instant(flame, F, fdir, positions):
         fig, ax = plt.subplots(1, 1, figsize=(10, FR.shape[0] / FR.shape[1] * 10), dpi=150)
         ax.imshow(rgb, aspect='equal', interpolation='nearest')
         _annotate(ax, 'cyan')
-        ax.set_title(f"{flame} — stitched instantaneous front #{ci}, binarized{a_txt}\n"
+        ax.set_title(f"{flame} — {thr_label(t)} — stitched instantaneous front #{ci}, binarized{a_txt}\n"
                      f"(synthetic: positions not simultaneous; dim red = outer edge, not counted)",
                      fontsize=9)
         ax.axis('off'); fig.tight_layout()
@@ -1261,7 +1347,7 @@ def finalize_instant(flame, F, fdir, positions):
                     bbox_inches='tight', dpi=150)
         plt.close(fig)
         out.append(info)
-        log(f"    instantaneous #{ci}: frames {info['frames_used']}  "
+        log(f"    {pre}instantaneous #{ci}: frames {info['frames_used']}  "
             f"mismatch px {[round(c) for c in jc]}{a_txt}")
     return out
 
@@ -1286,11 +1372,13 @@ def build_settings_log(flame, fdir, positions, mans):
                else f"for {pos_list_str(plist)}:")
         L.append(hdr)
         prods = json.loads(key)
-        cb = prods.get("cbar")
         for prod, st in prods.items():
-            if prod == "instant" and cb is not None and all(
+            kind, t_ = parse_prod(prod)
+            cb = prods.get(prod_key("cbar", t_)) if t_ is not None else prods.get("cbar")
+            if kind == "instant" and cb is not None and all(
                     st.get(k) == cb.get(k) for k in PROCESSING_KEYS):
-                L.append("  [instant]  same image-processing settings as [cbar], plus:")
+                L.append(f"  [{prod}]  same image-processing settings as "
+                         f"[{prod.replace('instant', 'cbar')}], plus:")
                 L += [f"    {k} = {st.get(k)!r}" for k in INSTANT_KEYS]
                 continue
             L.append(f"  [{prod}]")
@@ -1322,16 +1410,41 @@ def h_hdr(lv): return f"h_(c̄={lv}) [mm]"
 
 
 def write_table(path, sheets):
-    """sheets: list of (name, header, rows).  xlsx via openpyxl, else CSVs."""
+    """sheets: list of (name, header, rows) or (name, header, rows, groups).
+    groups = [(label, first_col, n_cols), ...] (1-based columns) → an extra
+    header row above with merged group cells (e.g. 'Threshold 25%'); columns
+    not in any group are merged vertically over both header rows.
+    xlsx via openpyxl, else CSVs."""
     try:
         from openpyxl import Workbook
         from openpyxl.utils import get_column_letter
+        from openpyxl.styles import Alignment, Font
         wb = Workbook(); first = True
-        for name, header, rows in sheets:
+        for sh in sheets:
+            name, header, rows = sh[:3]
+            groups = sh[3] if len(sh) > 3 else None
             ws = wb.active if first else wb.create_sheet()
             first = False
             ws.title = name[:31]
-            ws.append(header)
+            if groups:
+                in_group = set()
+                for label, c0, n in groups:
+                    ws.cell(row=1, column=c0, value=label)
+                    if n > 1:
+                        ws.merge_cells(start_row=1, start_column=c0, end_row=1, end_column=c0 + n - 1)
+                    ws.cell(row=1, column=c0).alignment = Alignment(horizontal="center")
+                    ws.cell(row=1, column=c0).font = Font(bold=True)
+                    in_group.update(range(c0, c0 + n))
+                for i, hd in enumerate(header, 1):
+                    if i in in_group:
+                        ws.cell(row=2, column=i, value=hd)
+                    else:
+                        ws.cell(row=1, column=i, value=hd)
+                        ws.merge_cells(start_row=1, start_column=i, end_row=2, end_column=i)
+                        ws.cell(row=1, column=i).alignment = Alignment(vertical="center")
+                ws.freeze_panes = "B3"
+            else:
+                ws.append(header)
             for r in rows:
                 ws.append(r)
             for i, hd in enumerate(header, 1):
@@ -1342,21 +1455,41 @@ def write_table(path, sheets):
     except ImportError:
         import csv
         base = os.path.splitext(path)[0]
-        for name, header, rows in sheets:
+        for sh in sheets:
+            name, header, rows = sh[:3]
+            groups = sh[3] if len(sh) > 3 else None
             with open(f"{base}_{safe_name(name)}.csv", "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f); w.writerow(header); w.writerows(rows)
+                w = csv.writer(f)
+                if groups:
+                    top = [""] * len(header)
+                    for label, c0, n in groups:
+                        top[c0 - 1] = label
+                    w.writerow(top)
+                w.writerow(header); w.writerows(rows)
         return base + "_*.csv (openpyxl missing)"
 
 
-def results_row(flame, cb):
+def results_block(cb):
+    """A for every level (lowest first), then h for every level."""
     lv_sorted = sorted(CBAR_LEVELS)
-    return ([flame] + [round(cb["levels"][str(lv)]["A_total"], 2) for lv in lv_sorted]
+    if not cb:
+        return [""] * (2 * len(lv_sorted))
+    return ([round(cb["levels"][str(lv)]["A_total"], 2) for lv in lv_sorted]
             + [round(cb["levels"][str(lv)]["h"], 2) for lv in lv_sorted])
 
 
-def results_header():
+def grouped_results(flames_cb):
+    """flames_cb: [(flame, {tag: cbar_result})] → (header, rows, groups),
+    one column group per threshold: 'Threshold 25%' → A_(c̄=…)…, h_(c̄=…)…"""
     lv_sorted = sorted(CBAR_LEVELS)
-    return ["Condition"] + [A_hdr(lv) for lv in lv_sorted] + [h_hdr(lv) for lv in lv_sorted]
+    block = [A_hdr(lv) for lv in lv_sorted] + [h_hdr(lv) for lv in lv_sorted]
+    header, groups = ["Condition"], []
+    for t in thresholds():
+        groups.append((thr_label(t), len(header) + 1, len(block)))
+        header += block
+    rows = [[f] + sum((results_block(cbd.get(thr_tag(t))) for t in thresholds()), [])
+            for f, cbd in flames_cb]
+    return header, rows, groups
 
 
 def instant_rows(inst):
@@ -1366,23 +1499,34 @@ def instant_rows(inst):
             for i in (inst or [])]
 
 
-def write_flame_excel(flame, fdir, positions, mans, cb, inst=None):
-    sheets = [("Results", results_header(), [results_row(flame, cb)])]
-    if inst and any("A_inst_mm2" in i for i in inst):
-        sheets.append(("Instantaneous", ["composite #", "A_inst [mm²] (measured part only)",
-                                         "frames used", "junction mismatch [px]"],
-                       instant_rows(inst)))
+def write_flame_excel(flame, fdir, positions, mans, cbd, instd=None):
+    """cbd / instd: {threshold tag: result} for this flame."""
+    header, rows_, groups = grouped_results([(flame, cbd)])
+    sheets = [("Results", header, rows_, groups)]
+    irows = []
+    for t in thresholds():
+        for r in instant_rows((instd or {}).get(thr_tag(t))):
+            irows.append([f"{thr_pct(t)}%"] + r)
+    if any(r[2] != "" for r in irows):
+        sheets.append(("Instantaneous", ["threshold", "composite #",
+                                         "A_inst [mm²] (measured part only)",
+                                         "frames used", "junction mismatch [px]"], irows))
     rows = []
-    for lv in sorted(CBAR_LEVELS):
-        d = cb["levels"][str(lv)]
-        rows.append([lv, round(d["A_real"], 2), round(d["A_ext"], 2), round(d["A_total"], 2),
-                     round(d["h"], 2), d["tip_row"], d["tip_col"], d["status"]])
-    sheets.append(("Area breakdown", ["c̄ level", "A_real pos1+ [mm²]", "A_ext pos0 [mm²]",
-                                      "A_total [mm²]", "h [mm]", "tip row", "tip col",
-                                      "contour status"], rows))
+    for t in thresholds():
+        cb = cbd.get(thr_tag(t))
+        if not cb:
+            continue
+        for lv in sorted(CBAR_LEVELS):
+            d = cb["levels"][str(lv)]
+            rows.append([f"{thr_pct(t)}%", lv, round(d["A_real"], 2), round(d["A_ext"], 2),
+                         round(d["A_total"], 2), round(d["h"], 2), d["tip_row"], d["tip_col"],
+                         d["status"]])
+    sheets.append(("Area breakdown", ["threshold", "c̄ level", "A_real pos1+ [mm²]",
+                                      "A_ext pos0 [mm²]", "A_total [mm²]", "h [mm]", "tip row",
+                                      "tip col", "contour status"], rows))
     prow = []
     for p in positions:
-        m = mans[p]; c = m["products"].get("cbar", {})
+        m = mans[p]; c = m["products"].get(prod_key("cbar", thresholds()[0]), {})
         prow.append([p, ", ".join(n for n, _ in m["sources"]["data"]),
                      m["sources"]["bg"][0] if m["sources"]["bg"] else "NONE",
                      c.get("n_frames", ""), c.get("skipped_leading", ""), c.get("finished", "")])
@@ -1420,17 +1564,21 @@ def finalize_flame(flame, F):
                            f"(set ALLOW_POSITION_GAPS=True to force)")
     result = {"flame": flame, "positions": positions, "gaps": F["gaps"],
               "no_bg": [p for p in positions if mans[p]["sources"]["bg"] is None],
-              "cbar": None, "instant": None}
-    if DO_CBAR:
-        if all("cbar" in mans[p]["products"] for p in positions):
-            result["cbar"] = finalize_cbar(flame, F, fdir, positions)
-        else:
-            warn(flame, "c̄ results missing for some positions → no c-line output")
-    if DO_INSTANT:
-        if all("instant" in mans[p]["products"] for p in positions):
-            result["instant"] = finalize_instant(flame, F, fdir, positions)
-        else:
-            warn(flame, "instantaneous fronts missing for some positions")
+              "thresholds": thresholds(), "cbar": {}, "instant": {}}
+    for t in thresholds():
+        if len(thresholds()) > 1:
+            log(f"  ── {thr_label(t)} ──")
+        if DO_CBAR:
+            if all(prod_key("cbar", t) in mans[p]["products"] for p in positions):
+                result["cbar"][thr_tag(t)] = finalize_cbar(flame, F, fdir, positions, t)
+            else:
+                warn(flame, f"c̄ results ({thr_pct(t)}%) missing for some positions "
+                            "→ no c-line output")
+        if DO_INSTANT:
+            if all(prod_key("instant", t) in mans[p]["products"] for p in positions):
+                result["instant"][thr_tag(t)] = finalize_instant(flame, F, fdir, positions, t)
+            else:
+                warn(flame, f"instantaneous fronts ({thr_pct(t)}%) missing for some positions")
     if result["cbar"]:
         x = write_flame_excel(flame, fdir, positions, mans, result["cbar"], result["instant"])
         log(f"    Excel → {x}")
@@ -1446,35 +1594,54 @@ def write_master(flames, results, status):
     if not DO_CBAR:
         log("DO_CBAR is off → no combined c-line Excel.")
         return
-    rows = [results_row(f, results[f]["cbar"]) for f in flames
-            if results.get(f) and results[f].get("cbar")]
+    def cbd_of(r):
+        c = (r or {}).get("cbar") or {}
+        return c if all(k.startswith("t") for k in c) else {}   # pre-v8.4 results: ignore
+
+    header, rows, groups = grouped_results(
+        [(f, cbd_of(results.get(f))) for f in flames if cbd_of(results.get(f))])
     st_rows = []
     for f in flames:
         r = results.get(f) or {}
         cbs = []
-        if r.get("cbar"):
-            cbs = [f"{lv}:{d['status']}" for lv, d in r["cbar"]["levels"].items()
-                   if d["status"] != "closed"]
+        for t in thresholds():
+            cb = cbd_of(r).get(thr_tag(t))
+            if cb:
+                bad = [f"{lv}:{d['status']}" for lv, d in cb["levels"].items()
+                       if d["status"] != "closed"]
+                if bad:
+                    cbs.append(f"{thr_pct(t)}%: " + ", ".join(bad))
         st_rows.append([f, status.get(f, "?"), pos_list_str(flames[f]["positions"]),
                         str(flames[f]["gaps"] or ""), str(r.get("no_bg") or ""),
                         "; ".join(cbs), sum(1 for ff, _ in WARNINGS if ff == f)])
+    # instantaneous area, grouped per threshold: mean, std, n, A_real per level
+    iblock = (["A_inst mean [mm²]", "A_inst std [mm²]", "n"]
+              + [f"A_real (c̄={lv}) [mm²]" for lv in sorted(CBAR_LEVELS)])
+    iheader, igroups = ["Condition"], []
+    for t in thresholds():
+        igroups.append((thr_label(t), len(iheader) + 1, len(iblock)))
+        iheader += iblock
     inst_rows = []
     for f in flames:
         r = results.get(f) or {}
-        vals = [i["A_inst_mm2"] for i in (r.get("instant") or []) if "A_inst_mm2" in i]
-        if vals:
-            a_real = ([round(r["cbar"]["levels"][str(lv)]["A_real"], 2)
-                       for lv in sorted(CBAR_LEVELS)] if r.get("cbar") else [])
-            inst_rows.append([f, round(float(np.mean(vals)), 2),
-                              round(float(np.std(vals)), 2), len(vals)] + vals
-                             + [""] * (N_INSTANT_COMPOSITES - len(vals)) + a_real)
-    extra = []
-    if inst_rows:
-        extra = [("Instantaneous A", ["Condition", "A_inst mean [mm²]", "A_inst std [mm²]", "n"]
-                  + [f"A_inst #{i} [mm²]" for i in range(1, N_INSTANT_COMPOSITES + 1)]
-                  + [f"A_real (c̄={lv}) [mm²]" for lv in sorted(CBAR_LEVELS)], inst_rows)]
+        instd = (r.get("instant") or {}) if isinstance(r.get("instant"), dict) else {}
+        row, any_val = [f], False
+        for t in thresholds():
+            vals = [i["A_inst_mm2"] for i in (instd.get(thr_tag(t)) or []) if "A_inst_mm2" in i]
+            cb = cbd_of(r).get(thr_tag(t))
+            a_real = ([round(cb["levels"][str(lv)]["A_real"], 2) for lv in sorted(CBAR_LEVELS)]
+                      if cb else [""] * len(CBAR_LEVELS))
+            if vals:
+                any_val = True
+                row += [round(float(np.mean(vals)), 2), round(float(np.std(vals)), 2), len(vals)]
+            else:
+                row += ["", "", ""]
+            row += a_real
+        if any_val:
+            inst_rows.append(row)
+    extra = [("Instantaneous A", iheader, inst_rows, igroups)] if inst_rows else []
     x = write_table(os.path.join(OUTDIR, "ALL_conditions_results.xlsx"),
-                    [("All conditions", results_header(), rows)] + extra + [
+                    [("All conditions", header, rows, groups)] + extra + [
                      ("Run status", ["Condition", "status", "positions", "missing positions",
                                      "positions without bg", "c-lines not closed",
                                      "# warnings this run"], st_rows)])
@@ -1504,6 +1671,8 @@ def main():
     log(f"INPUT_DIR  = {INPUT_DIR}\nOUTDIR     = {OUTDIR}\nlog file   = {log_path}")
     log(f"DO_CBAR={DO_CBAR}  DO_INSTANT={DO_INSTANT}  NUM_WORKERS={NUM_WORKERS}  "
         f"CHUNK_FRAMES={CHUNK_FRAMES}  N_INSTANT={N_INSTANT}")
+    log(f"thresholds = {', '.join(thr_pct(t) + '%' for t in thresholds())}   "
+        f"NOZZLE_CENTER = {NOZZLE_CENTER}   POS1_OFFSET_MM = {POS1_OFFSET_MM}")
     cd = os.path.join(OUTDIR, "code_used"); os.makedirs(cd, exist_ok=True)
     shutil.copy2(os.path.abspath(__file__), os.path.join(cd, os.path.basename(__file__)))
     sr = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spe_reader.py")
@@ -1571,7 +1740,7 @@ def main():
                              "bg_path": ent["bg"], "pos_dir": os.path.join(fdir, f"pos{pos}"),
                              "needs": needs, "keep_products": keep,
                              "sources": source_sig(ent)})
-                parts.append(f"pos{pos}:{'+'.join(needs)}")
+                parts.append(f"pos{pos}:[{needs_str(needs)}]")
             else:
                 parts.append(f"pos{pos}:done")
         log(f"  {f}: " + "  ".join(parts))
@@ -1632,7 +1801,7 @@ def main():
             el = time.time() - t_start
             eta = el / done_jobs * (n_jobs - done_jobs)
             if r["ok"]:
-                mark = f"✓ {f}  pos{p} [{'+'.join(r['needs'])}] {r['n_frames']} fr, {r['seconds']:.0f} s"
+                mark = f"✓ {f}  pos{p} [{needs_str(r['needs'])}] {r['n_frames']} fr, {r['seconds']:.0f} s"
             else:
                 failed_pos[f].add(p)
                 mark = f"✗ {f}  pos{p} FAILED after {r['seconds']:.0f} s"

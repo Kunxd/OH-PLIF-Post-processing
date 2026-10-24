@@ -8,6 +8,7 @@ OUTDIR      = "/home/USERNAME/Wabel_results"   # internal disk recommended
 NUM_WORKERS = 4        # i7 11th gen (4 cores / 8 threads)
 DO_CBAR     = True
 DO_INSTANT  = True
+THRESHOLD_FRAC = 0.25   # or several, e.g. [0.25, 0.30] → results grouped per threshold
 N_INSTANT   = 50
 INSTANT_AREA = True    # revolve the stitched instantaneous front → A_inst (sensitivity check)
 

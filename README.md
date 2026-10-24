@@ -37,12 +37,17 @@ for backgrounds. The flame name (everything before `_pos<N>`) becomes the output
 folder name; the nozzle diameter is read from `D<n>` in it.
 
 ## Output (per flame, in `OUTDIR/<flame name>/`)
-- `average composites/` – c̄ composite without / per / with all c-lines, `cbar_composite.npy`, `c_lines.npz`
-- `instantaneous/` – stitched instantaneous fronts on the raw bg-subtracted signal (white → red, front in blue; PNG + `.npy` + frame info `.json`)
-- `instantaneous_binarized/` – the same stitched frames as binary images (PNG + `.npy`)
-- With `INSTANT_AREA = True`, the inner flame front of each stitched composite (outer product/air edge removed, pockets kept) is revolved 180° per side like the c-lines → `A_inst`, listed in the flame Excel and in the `Instantaneous A` sheet of the combined Excel next to `A_real`.
-- `<flame>_results.xlsx` – A and h per c̄ level, area breakdown, input files
+Everything that depends on the binarization threshold is stored per threshold
+(`THRESHOLD_FRAC` can be one value or a list, e.g. `[0.25, 0.30]`):
+- `threshold_25/average composites/` – c̄ composite without / per / with all c-lines, `cbar_composite.npy`, `c_lines.npz`
+- `threshold_25/instantaneous/` – stitched instantaneous fronts on the raw bg-subtracted signal (white → red, front in blue; PNG + `.npy` + frame info `.json`)
+- `threshold_25/instantaneous_binarized/` – the same stitched frames as binary images
+- `<flame>_results.xlsx` – A and h per c̄ level, grouped per threshold (merged header "Threshold 25%" …), area breakdown, instantaneous A, input files
 - `user_settings_log.txt` – settings used per position
-- `posN/` – `cbar.npy`, instantaneous fronts, overlays, `done.json` (resume marker)
+- `posN/` – `cbar_t25.npy`, `instant_fronts_t25.npz`, overlays, `done.json` (resume marker)
+
+Adding a threshold later only processes the new threshold; existing ones are reused.
+Results from before v8.4 (`cbar.npy`, `instant_fronts.npz`) are renamed automatically.
+With `INSTANT_AREA = True`, the inner flame front of each stitched composite (outer product/air edge removed, pockets kept) is revolved 180° per side like the c-lines → `A_inst`.
 
 Combined over all flames: `OUTDIR/ALL_conditions_results.xlsx`; run logs in `OUTDIR/logs/`.
