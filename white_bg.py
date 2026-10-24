@@ -211,32 +211,74 @@ def synthetic_tests(outdir):
 # ─────────────────────────────────────────────────────────────────────
 # Real frames from a results folder
 # ─────────────────────────────────────────────────────────────────────
+def _collect_sources(results, flame_filter=None):
+    """Find binarized frames anywhere below the results folder (any version):
+      - posN/instant_fronts*.npz       single frames per position (50–100 each)
+      - instant_binary_composite_*.npy stitched binary composites
+                                       (…/instantaneous_binarized/ or older …/instantaneous/)
+      - posN/binary_*.png              fallback: the few debug binaries per position
+    Returns [(flame, label, tag, [(frame_id, binary_array), ...]), ...]."""
+    skip = os.sep + "white_bg" + os.sep
+    def ok(f):
+        return skip not in f and (not flame_filter or flame_filter.lower() in f.lower())
+    def flame_of(f):
+        return os.path.relpath(f, results).split(os.sep)[0]
+
+    out = []
+    npz = sorted(f for f in glob.glob(os.path.join(results, "**", "instant_fronts*.npz"),
+                                      recursive=True) if ok(f))
+    for f in npz:
+        tag = os.path.basename(f)[len("instant_fronts"):-4].strip("_")
+        pos = os.path.basename(os.path.dirname(f))
+        z = np.load(f)
+        frames = [(f"frame{int(i):04d}", z["binaries"][k]) for k, i in enumerate(z["frame_index"])]
+        out.append((flame_of(f), pos, tag, frames))
+
+    comp = sorted(f for f in glob.glob(os.path.join(results, "**", "instant_binary_composite_*.npy"),
+                                       recursive=True) if ok(f))
+    groups = {}
+    for f in comp:
+        rel = os.path.relpath(os.path.dirname(f), results).split(os.sep)
+        tag = next((x.replace("threshold_", "t") for x in rel if x.startswith("threshold_")), "")
+        n = os.path.basename(f)[len("instant_binary_composite_"):-4]
+        groups.setdefault((rel[0], tag), []).append((f"composite{n}", np.load(f).astype(bool)))
+    for (flame, tag), frames in sorted(groups.items()):
+        out.append((flame, "stitched", tag, frames))
+
+    if not out:   # fallback: debug binaries
+        pngs = sorted(f for f in glob.glob(os.path.join(results, "**", "pos*", "binary_*.png"),
+                                           recursive=True) if ok(f))
+        import cv2
+        g2 = {}
+        for f in pngs:
+            g2.setdefault((flame_of(f), os.path.basename(os.path.dirname(f))), []).append(
+                (os.path.basename(f)[:-4], cv2.imread(f, cv2.IMREAD_GRAYSCALE) > 0))
+        for (flame, pos), frames in sorted(g2.items()):
+            out.append((flame, pos, "", frames))
+    return out
+
+
 def real_frames(results, outdir, flame_filter=None, close_px=0, max_plots=3, min_size=50):
-    os.makedirs(outdir, exist_ok=True)
-    files = sorted(glob.glob(os.path.join(results, "*", "pos*", "instant_fronts*.npz")))
-    if flame_filter:
-        files = [f for f in files if flame_filter.lower() in f.lower()]
-    if not files:
-        print(f"No pos*/instant_fronts*.npz found under {results}")
+    sources = _collect_sources(results, flame_filter)
+    if not sources:
+        print(f"No binarized frames found under {results}\n"
+              "(looked for pos*/instant_fronts*.npz, instant_binary_composite_*.npy and "
+              "pos*/binary_*.png).  Is OUTDIR the folder that contains the flame folders?")
         return
-    print(f"Results folder : {results}\nFrames from    : {len(files)} position files"
-          f"   close_gaps_px={close_px}   (components < {min_size} px counted as specks)\n")
-    print(f"{'flame / position':<52} {'frames':>6} {'0 core':>7} {'1 core':>7} {'>1':>5}  "
+    os.makedirs(outdir, exist_ok=True)
+    n_fr = sum(len(fr) for *_, fr in sources)
+    print(f"Results folder : {results}\nFrames found   : {n_fr} in {len(sources)} groups   "
+          f"close_gaps_px={close_px}   (components < {min_size} px counted as specks)\n")
+    print(f"{'flame / position':<56} {'frames':>6} {'0 core':>7} {'1 core':>7} {'>1':>5}  "
           f"{'>1 if specks ignored':>20}")
     rows = []
-    for f in files:
-        pos = os.path.basename(os.path.dirname(f))
-        flame = os.path.basename(os.path.dirname(os.path.dirname(f)))
-        tag = os.path.basename(f)[len("instant_fronts"):-4].strip("_") or ""
-        z = np.load(f)
-        bins, idx = z["binaries"], z["frame_index"]
-        counts = []
-        worst = []
-        for i in range(bins.shape[0]):
-            core, proc, info = isolate_inner_core(bins[i], close_gaps_px=close_px, return_info=True)
+    for flame, pos, tag, frames in sources:
+        counts, worst = [], []
+        for i, (fid, img) in enumerate(frames):
+            core, proc, info = isolate_inner_core(img, close_gaps_px=close_px, return_info=True)
             big = sum(1 for s in info["component_sizes"] if s >= min_size)
             counts.append((info["n_components"], big))
-            rows.append([flame, pos, tag, int(idx[i]), info["n_components"], big,
+            rows.append([flame, pos, tag, fid, info["n_components"], big,
                          info["core_pixels"], " ".join(map(str, info["component_sizes"][:5]))])
             worst.append((big != 1, big, i, core, proc))
         n0 = sum(1 for n, _ in counts if n == 0)
@@ -244,15 +286,16 @@ def real_frames(results, outdir, flame_filter=None, close_px=0, max_plots=3, min
         nm = sum(1 for n, _ in counts if n > 1)
         nb = sum(1 for _, b in counts if b > 1)
         label_ = f"{flame}/{pos}" + (f" [{tag}]" if tag else "")
-        print(f"{label_:<52} {len(counts):6d} {n0:7d} {n1:7d} {nm:5d}  {nb:20d}")
+        print(f"{label_:<56} {len(counts):6d} {n0:7d} {n1:7d} {nm:5d}  {nb:20d}")
         # plots: first frame + the frames with the most / no core components
         worst.sort(key=lambda w: (not w[0], -w[1]))
         pick = [0] + [w[2] for w in worst[:max_plots - 1] if w[0]]
         for i in dict.fromkeys(pick):
             core, proc = [(w[3], w[4]) for w in worst if w[2] == i][0]
-            fn = f"{flame}_{pos}{'_' + tag if tag else ''}_frame{int(idx[i]):04d}.png"
-            validate_visually(bins[i], core, proc, os.path.join(outdir, fn),
-                              f"{flame} {pos} frame {int(idx[i])}  close_gaps_px={close_px}")
+            fid, img = frames[i]
+            fn = f"{flame}_{pos}{'_' + tag if tag else ''}_{fid}.png"
+            validate_visually(img, core, proc, os.path.join(outdir, fn),
+                              f"{flame} {pos} {fid}  close_gaps_px={close_px}")
     out = os.path.join(outdir, "white_bg_check.csv")
     with open(out, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
@@ -261,7 +304,8 @@ def real_frames(results, outdir, flame_filter=None, close_px=0, max_plots=3, min
         w.writerows(rows)
     print(f"\nPer-frame table → {out}\nPlots            → {outdir}")
     print("Note: '0 core' is expected above the flame tip (no unburnt core there); in lower\n"
-          "positions it means the core is connected to the background through a gap.")
+          "positions it means the core is connected to the background through a gap.\n"
+          "'stitched' = the stitched instantaneous composites (core open at the bottom only).")
 
 
 def main():
