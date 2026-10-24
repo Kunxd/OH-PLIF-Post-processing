@@ -217,7 +217,8 @@ def _collect_sources(results, flame_filter=None):
       - instant_binary_composite_*.npy stitched binary composites
                                        (…/instantaneous_binarized/ or older …/instantaneous/)
       - posN/binary_*.png              fallback: the few debug binaries per position
-    Returns [(flame, label, tag, [(frame_id, binary_array), ...]), ...]."""
+    Returns [(flame, label, tag, n_frames, loader), ...]; loader() loads that group's
+    frames [(frame_id, binary_array), ...] only when it is processed (low memory)."""
     skip = os.sep + "white_bg" + os.sep
     def ok(f):
         return skip not in f and (not flame_filter or flame_filter.lower() in f.lower())
@@ -227,12 +228,19 @@ def _collect_sources(results, flame_filter=None):
     out = []
     npz = sorted(f for f in glob.glob(os.path.join(results, "**", "instant_fronts*.npz"),
                                       recursive=True) if ok(f))
+    def npz_loader(f):
+        def load():
+            with np.load(f) as z:
+                bins = z["binaries"]            # decompress ONCE
+                idx = z["frame_index"]
+            return [(f"frame{int(i):04d}", bins[k]) for k, i in enumerate(idx)]
+        return load
     for f in npz:
         tag = os.path.basename(f)[len("instant_fronts"):-4].strip("_")
         pos = os.path.basename(os.path.dirname(f))
-        z = np.load(f)
-        frames = [(f"frame{int(i):04d}", z["binaries"][k]) for k, i in enumerate(z["frame_index"])]
-        out.append((flame_of(f), pos, tag, frames))
+        with np.load(f) as z:
+            n = len(z["frame_index"])
+        out.append((flame_of(f), pos, tag, n, npz_loader(f)))
 
     comp = sorted(f for f in glob.glob(os.path.join(results, "**", "instant_binary_composite_*.npy"),
                                        recursive=True) if ok(f))
@@ -241,9 +249,10 @@ def _collect_sources(results, flame_filter=None):
         rel = os.path.relpath(os.path.dirname(f), results).split(os.sep)
         tag = next((x.replace("threshold_", "t") for x in rel if x.startswith("threshold_")), "")
         n = os.path.basename(f)[len("instant_binary_composite_"):-4]
-        groups.setdefault((rel[0], tag), []).append((f"composite{n}", np.load(f).astype(bool)))
-    for (flame, tag), frames in sorted(groups.items()):
-        out.append((flame, "stitched", tag, frames))
+        groups.setdefault((rel[0], tag), []).append((f"composite{n}", f))
+    for (flame, tag), items in sorted(groups.items()):
+        out.append((flame, "stitched", tag, len(items),
+                    (lambda items=items: [(fid, np.load(f).astype(bool)) for fid, f in items])))
 
     if not out:   # fallback: debug binaries
         pngs = sorted(f for f in glob.glob(os.path.join(results, "**", "pos*", "binary_*.png"),
@@ -251,10 +260,12 @@ def _collect_sources(results, flame_filter=None):
         import cv2
         g2 = {}
         for f in pngs:
-            g2.setdefault((flame_of(f), os.path.basename(os.path.dirname(f))), []).append(
-                (os.path.basename(f)[:-4], cv2.imread(f, cv2.IMREAD_GRAYSCALE) > 0))
-        for (flame, pos), frames in sorted(g2.items()):
-            out.append((flame, pos, "", frames))
+            g2.setdefault((flame_of(f), os.path.basename(os.path.dirname(f))), []).append(f)
+        for (flame, pos), items in sorted(g2.items()):
+            out.append((flame, pos, "", len(items),
+                        (lambda items=items: [(os.path.basename(f)[:-4],
+                                               cv2.imread(f, cv2.IMREAD_GRAYSCALE) > 0)
+                                              for f in items])))
     return out
 
 
@@ -266,13 +277,14 @@ def real_frames(results, outdir, flame_filter=None, close_px=0, max_plots=3, min
               "pos*/binary_*.png).  Is OUTDIR the folder that contains the flame folders?")
         return
     os.makedirs(outdir, exist_ok=True)
-    n_fr = sum(len(fr) for *_, fr in sources)
+    n_fr = sum(src[3] for src in sources)
     print(f"Results folder : {results}\nFrames found   : {n_fr} in {len(sources)} groups   "
           f"close_gaps_px={close_px}   (components < {min_size} px counted as specks)\n")
     print(f"{'flame / position':<56} {'frames':>6} {'0 core':>7} {'1 core':>7} {'>1':>5}  "
           f"{'>1 if specks ignored':>20}")
     rows = []
-    for flame, pos, tag, frames in sources:
+    for flame, pos, tag, _n, loader in sources:
+        frames = loader()                       # only this group in memory
         counts, worst = [], []
         for i, (fid, img) in enumerate(frames):
             core, proc, info = isolate_inner_core(img, close_gaps_px=close_px, return_info=True)
@@ -280,7 +292,7 @@ def real_frames(results, outdir, flame_filter=None, close_px=0, max_plots=3, min
             counts.append((info["n_components"], big))
             rows.append([flame, pos, tag, fid, info["n_components"], big,
                          info["core_pixels"], " ".join(map(str, info["component_sizes"][:5]))])
-            worst.append((big != 1, big, i, core, proc))
+            worst.append((big != 1, big, i))       # keep no image copies
         n0 = sum(1 for n, _ in counts if n == 0)
         n1 = sum(1 for n, _ in counts if n == 1)
         nm = sum(1 for n, _ in counts if n > 1)
@@ -291,11 +303,12 @@ def real_frames(results, outdir, flame_filter=None, close_px=0, max_plots=3, min
         worst.sort(key=lambda w: (not w[0], -w[1]))
         pick = [0] + [w[2] for w in worst[:max_plots - 1] if w[0]]
         for i in dict.fromkeys(pick):
-            core, proc = [(w[3], w[4]) for w in worst if w[2] == i][0]
             fid, img = frames[i]
+            core, proc = isolate_inner_core(img, close_gaps_px=close_px)   # recompute for plot
             fn = f"{flame}_{pos}{'_' + tag if tag else ''}_{fid}.png"
             validate_visually(img, core, proc, os.path.join(outdir, fn),
                               f"{flame} {pos} {fid}  close_gaps_px={close_px}")
+        del frames
     out = os.path.join(outdir, "white_bg_check.csv")
     with open(out, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
