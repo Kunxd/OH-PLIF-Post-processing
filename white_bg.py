@@ -31,9 +31,9 @@ ADAPTATIONS for our OH-PLIF frames (see README / chat notes)
      file instead of plt.show() (works on a laptop terminal without display).
   4. Command-line validation on real frames from our results folders.
 
-Usage
-  python3 white_bg.py --synthetic                       # synthetic tests
-  python3 white_bg.py                                   # real frames, OUTDIR from config_local.py
+Usage (output always goes to <OUTDIR>/white_bg/, OUTDIR from config_local.py)
+  python3 white_bg.py --synthetic                       # synthetic tests  → white_bg/synthetic/
+  python3 white_bg.py                                   # real frames      → white_bg/check/
   python3 white_bg.py --results /path/to/Run1 --flame D12_CH4_Re15000 --close 5
 """
 
@@ -267,21 +267,27 @@ def real_frames(results, outdir, flame_filter=None, close_px=0, max_plots=3, min
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--synthetic", action="store_true", help="run only the synthetic tests")
-    ap.add_argument("--results", help="results folder (default: OUTDIR from config_local.py)")
+    ap.add_argument("--results", help="results folder to read (default: OUTDIR from config_local.py)")
     ap.add_argument("--flame", help="only flames whose name contains this text")
     ap.add_argument("--close", type=int, default=0, help="close_gaps_px (default 0 = off)")
     ap.add_argument("--plots", type=int, default=3, help="check images per position (default 3)")
     a = ap.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, here)
+    import run_wabel_batch as W                       # loads config_local.py
+    root = os.path.abspath(a.results or W.OUTDIR)
+    # all white-background output lives in one folder inside the results folder:
+    #   <OUTDIR>/white_bg/synthetic/      synthetic tests
+    #   <OUTDIR>/white_bg/check/          real frames (check_close5/ with --close 5)
+    wdir = os.path.join(root, "white_bg")
+    print(f"config         : {W._CONFIG_LOCAL or 'no config_local.py found (script defaults)'}")
+    print(f"output folder  : {wdir}\n")
     if a.synthetic:
-        synthetic_tests(os.path.join(here, "white_bg_synthetic"))
+        synthetic_tests(os.path.join(wdir, "synthetic"))
         return
-    root = a.results
-    if root is None:
-        sys.path.insert(0, here)
-        import run_wabel_batch as W
-        root = W.OUTDIR
-    real_frames(root, os.path.join(root, "white_bg_check" + (f"_close{a.close}" if a.close else "")),
+    if not os.path.isdir(root):
+        print(f"ERROR: results folder not found: {root}"); sys.exit(1)
+    real_frames(root, os.path.join(wdir, "check" + (f"_close{a.close}" if a.close else "")),
                 a.flame, a.close, a.plots)
 
 

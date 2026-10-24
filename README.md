@@ -12,7 +12,7 @@ surface area by revolution and flame height. S_T = ṁ / (ρ_u · A).
 | `run_wabel_batch.py` | main batch script (v8): all flames, parallel, resumable |
 | `spe_reader.py` | LightField / WinSpec `.spe` reader |
 | `estimate_nozzle_center.py` | estimates each flame's nozzle centre from the saved c̄ maps |
-| `white_bg.py` | white-background preprocessing (isolate the unburnt core); `--synthetic` tests, or validation on real frames of a results folder |
+| `white_bg.py` | white-background preprocessing (isolate the unburnt core): validation tool, run after `run_wabel_batch.py`; output in `OUTDIR/white_bg/` |
 | `config_local.example.py` | template for your machine-specific settings |
 
 ## Setup (once per computer)
