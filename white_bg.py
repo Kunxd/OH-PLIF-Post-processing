@@ -136,6 +136,10 @@ def validate_visually(binary_image, core_mask, processed_image):
 # Nothing above or below this block is changed.  This block only
 #   - reads OUTDIR from config_local.py (same settings file as run_wabel_batch.py)
 #   - saves every figure that validate_visually() shows into OUTDIR/white_bg/
+#     (if that folder already exists: white_bg_2, white_bg_3, ... nothing is overwritten)
+#   - writes run_info.txt into that folder: GitHub commit of this script, local
+#     changes, date, command, settings, package versions, input files
+#     (the commit is also stored in every PNG's metadata)
 #   - lets you run the original functions on real binarized frames
 # Usage:
 #   python3 white_bg.py                  original synthetic test        → OUTDIR/white_bg/synthetic_test.png
@@ -143,7 +147,7 @@ def validate_visually(binary_image, core_mask, processed_image):
 #   python3 white_bg.py FILE_OR_FOLDER   only these images (.png / .npy, or a folder with them)
 # =====================================================================
 if __name__ == "__main__":
-    import os, sys, glob, warnings
+    import os, sys, glob, warnings, re, subprocess, datetime, platform, scipy, matplotlib
     _here = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, _here)
     try:
@@ -152,8 +156,38 @@ if __name__ == "__main__":
     except ImportError:
         OUTDIR = os.path.join(_here, "Wabel_results")
         print("no config_local.py found → OUTDIR =", OUTDIR)
-    _out = os.path.join(OUTDIR, "white_bg")
-    os.makedirs(_out, exist_ok=True)
+    # new output folder per run: white_bg, white_bg_2, white_bg_3, ...
+    _out = os.path.join(OUTDIR, "white_bg"); _k = 1
+    while os.path.exists(_out):
+        _k += 1; _out = os.path.join(OUTDIR, f"white_bg_{_k}")
+    os.makedirs(_out)
+
+    # GitHub version of this script (git clone needed; 'unknown' otherwise)
+    def _git(*a):
+        try:
+            return subprocess.run(["git", "-C", _here, *a], capture_output=True,
+                                  text=True, timeout=10).stdout.strip()
+        except Exception:
+            return ""
+    _commit = _git("rev-parse", "HEAD") or "unknown (not a git clone)"
+    _cdate = _git("log", "-1", "--format=%ci")
+    _remote = _git("config", "--get", "remote.origin.url")
+    _dirty = _git("status", "--porcelain", "--", os.path.basename(__file__))
+    _version = _commit[:7] + (" + LOCAL CHANGES (not on GitHub)" if _dirty else "")
+    _info = os.path.join(_out, "run_info.txt")
+    with open(_info, "w", encoding="utf-8") as _fh:
+        _fh.write(f"script         : {os.path.abspath(__file__)}\n"
+                  f"github         : {_remote}\n"
+                  f"commit         : {_commit}  ({_cdate})\n"
+                  f"local changes  : {'YES - white_bg.py differs from this commit' if _dirty else 'no'}\n"
+                  f"run at         : {datetime.datetime.now().isoformat(timespec='seconds')}\n"
+                  f"command        : {' '.join([os.path.basename(sys.executable)] + sys.argv)}\n"
+                  f"OUTDIR         : {OUTDIR}\n"
+                  f"versions       : python {platform.python_version()}, numpy {np.__version__}, "
+                  f"scipy {scipy.__version__}, matplotlib {matplotlib.__version__}\n"
+                  f"settings       : isolate_inner_core(pad_width=5, verbose=True)\n\n"
+                  f"input files:\n")
+    print(f"commit          : {_version}")
     print(f"output folder   : {_out}\n")
 
     # save figures instead of opening windows (plt.show inside validate_visually)
@@ -161,7 +195,9 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", message=".*non-interactive.*")
     _save_as = [os.path.join(_out, "synthetic_test.png")]
     def _show_and_save(*a, **k):
-        plt.savefig(_save_as[0], dpi=110, bbox_inches="tight")
+        plt.savefig(_save_as[0], dpi=110, bbox_inches="tight",
+                    metadata={"Software": f"white_bg.py {_remote} commit {_commit}"
+                                          + (" + local changes" if _dirty else "")})
         plt.close("all")
         print(f"  figure → {_save_as[0]}")
     plt.show = _show_and_save
@@ -175,7 +211,8 @@ if __name__ == "__main__":
                     _files += glob.glob(os.path.join(_p, "**", _pat), recursive=True)
             else:
                 _files.append(_p)
-        _files = sorted(f for f in _files if os.sep + "white_bg" + os.sep not in f)
+        _files = sorted(f for f in _files
+                        if not re.search(r"(^|[\\/])white_bg(_\d+)?[\\/]", os.path.relpath(f, OUTDIR)))
         if not _files:
             print("no binarized images found (binary_*.png / instant_binary_composite_*.npy)")
         for _f in _files:
@@ -189,7 +226,11 @@ if __name__ == "__main__":
             _rel = os.path.relpath(_f, OUTDIR) if _f.startswith(OUTDIR) else os.path.basename(_f)
             _save_as[0] = os.path.join(_out, os.path.splitext(_rel)[0].replace(os.sep, "__") + ".png")
             validate_visually(img, core_mask, processed)
+            with open(_info, "a", encoding="utf-8") as _fh:
+                _fh.write(f"  {os.path.abspath(_f)}  →  {os.path.basename(_save_as[0])}\n")
         sys.exit(0)
+    with open(_info, "a", encoding="utf-8") as _fh:
+        _fh.write("  (none: original synthetic test → synthetic_test.png)\n")
 # ===================== end of ADDED block ============================
 
 
