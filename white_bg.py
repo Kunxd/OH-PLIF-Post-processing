@@ -141,14 +141,33 @@ def validate_visually(binary_image, core_mask, processed_image):
 #     changes, date, command, settings, package versions, input files
 #     (the commit is also stored in every PNG's metadata)
 #   - lets you run the original functions on real binarized frames
+#   - optional --pad-tb N: adds N WHITE rows on top and bottom of the image
+#     BEFORE the original isolate_inner_core() runs, and removes them again
+#     afterwards (her function itself still pads black on all sides)
 # Usage:
 #   python3 white_bg.py                  original synthetic test        → OUTDIR/white_bg/synthetic_test.png
 #   python3 white_bg.py --real           all binary_*.png and instant_binary_composite_*.npy under OUTDIR
 #   python3 white_bg.py FILE_OR_FOLDER   only these images (.png / .npy, or a folder with them)
+#   add  --pad-tb 5  to any of these to use 5 white rows on top/bottom (default: off = original)
 # =====================================================================
 if __name__ == "__main__":
     import os, sys, glob, warnings, re, subprocess, datetime, platform, scipy, matplotlib
     _here = os.path.dirname(os.path.abspath(__file__))
+    _argv = sys.argv[1:]; _pad_tb = 0
+    if "--pad-tb" in _argv:
+        _i = _argv.index("--pad-tb")
+        try:
+            _pad_tb = int(_argv[_i + 1])
+        except (IndexError, ValueError):
+            sys.exit("--pad-tb needs a number of pixels, e.g.  --pad-tb 5")
+        del _argv[_i:_i + 2]
+    if _pad_tb > 0:
+        _iic_original = isolate_inner_core
+        def isolate_inner_core(binary_image, pad_width=5, **kw):
+            img = np.asarray(binary_image).astype(bool)
+            img = np.pad(img, ((_pad_tb, _pad_tb), (0, 0)), constant_values=True)  # white rows
+            core, proc = _iic_original(img, pad_width=pad_width, **kw)
+            return core[_pad_tb:-_pad_tb], proc[_pad_tb:-_pad_tb]
     sys.path.insert(0, _here)
     try:
         from config_local import OUTDIR
@@ -185,9 +204,12 @@ if __name__ == "__main__":
                   f"OUTDIR         : {OUTDIR}\n"
                   f"versions       : python {platform.python_version()}, numpy {np.__version__}, "
                   f"scipy {scipy.__version__}, matplotlib {matplotlib.__version__}\n"
-                  f"settings       : isolate_inner_core(pad_width=5, verbose=True)\n\n"
+                  f"settings       : isolate_inner_core(pad_width=5, verbose=True)"
+                  + (f", plus {_pad_tb} WHITE rows added top/bottom first (--pad-tb {_pad_tb})"
+                     if _pad_tb else ", original black padding only") + "\n\n"
                   f"input files:\n")
     print(f"commit          : {_version}")
+    print(f"white top/bottom: {str(_pad_tb) + ' px' if _pad_tb else 'off (original)'}")
     print(f"output folder   : {_out}\n")
 
     # save figures instead of opening windows (plt.show inside validate_visually)
@@ -202,7 +224,7 @@ if __name__ == "__main__":
         print(f"  figure → {_save_as[0]}")
     plt.show = _show_and_save
 
-    _args = sys.argv[1:]
+    _args = _argv
     if _args:
         _files = []
         for _p in ([OUTDIR] if _args == ["--real"] else _args):
