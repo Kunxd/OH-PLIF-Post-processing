@@ -36,18 +36,31 @@ positions are found. An interrupted run is resumed by simply starting it again.
 for backgrounds. The flame name (everything before `_pos<N>`) becomes the output
 folder name; the nozzle diameter is read from `D<n>` in it.
 
-## Output (per flame, in `OUTDIR/<flame name>/`)
+## Output (v8.5: threshold → flame)
 Everything that depends on the binarization threshold is stored per threshold
-(`THRESHOLD_FRAC` can be one value or a list, e.g. `[0.25, 0.30]`):
-- `threshold_25/average composites/` – c̄ composite without / per / with all c-lines, `cbar_composite.npy`, `c_lines.npz`
-- `threshold_25/instantaneous/` – stitched instantaneous fronts on the raw bg-subtracted signal (white → red, front in blue; PNG + `.npy` + frame info `.json`)
-- `threshold_25/instantaneous_binarized/` – the same stitched frames as binary images
-- `<flame>_results.xlsx` – A and h per c̄ level, grouped per threshold (merged header "Threshold 25%" …), area breakdown, instantaneous A, input files
-- `user_settings_log.txt` – settings used per position
-- `posN/` – `cbar_t25.npy`, `instant_fronts_t25.npz`, overlays, `done.json` (resume marker)
-
-Adding a threshold later only processes the new threshold; existing ones are reused.
-Results from before v8.4 (`cbar.npy`, `instant_fronts.npz`) are renamed automatically.
+(`THRESHOLD_FRAC` can be one value or a list, e.g. `[0.20, 0.25, 0.30]`):
+```
+OUTDIR/
+├── ALL_conditions_results.xlsx        all flames × all thresholds (merged "Threshold 25%" column groups)
+├── threshold_25/
+│   ├── ALL_conditions_results_25.xlsx all flames, this threshold only (when several thresholds)
+│   └── <flame>/
+│       ├── average composites/        c̄ composite without / per / with all c-lines, cbar_composite.npy, c_lines.npz
+│       ├── instantaneous/             stitched instantaneous fronts on the raw bg-subtracted signal
+│       ├── instantaneous_binarized/   the same stitched frames as binary images
+│       ├── posN/                      cbar.npy, cbar_map.png, instant_fronts.npz, overlay_*.png, binary_*.png
+│       ├── <flame>_results.xlsx       A and h per c̄ level, area breakdown, instantaneous A, input files
+│       └── user_settings_log.txt
+├── threshold_30/ …
+├── _run_data/<flame>/                 bookkeeping shared by all thresholds (don't edit):
+│                                      posN/done.json (resume marker), bg_mean.npy, settings_posN.txt
+├── logs/  code_used/
+```
+Each frame is read once and binarized once per threshold. Adding a threshold
+later only processes the new threshold; existing ones are reused.
+Results from v8.4 and older (`OUTDIR/<flame>/…`) are moved into this layout
+automatically on the next run (nothing is reprocessed; the old flame Excel is
+kept as `_run_data/<flame>/old_<flame>_results.xlsx`).
 With `INSTANT_AREA = True`, the inner flame front of each stitched composite (outer product/air edge removed, pockets kept) is revolved 180° per side like the c-lines → `A_inst`.
 
-Combined over all flames: `OUTDIR/ALL_conditions_results.xlsx`; run logs in `OUTDIR/logs/`.
+Run logs in `OUTDIR/logs/`. `estimate_nozzle_center.py` reads `OUTDIR/threshold_XX/` (first threshold, or give one: `python3 estimate_nozzle_center.py OUTDIR 0.30`).

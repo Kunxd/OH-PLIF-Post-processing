@@ -22,7 +22,8 @@ Usage (in the repo folder):
     python3 estimate_nozzle_center.py /path/to/results # any results folder (also old v7 output)
     python3 estimate_nozzle_center.py /path/to/results 0.30   # use the 30 % threshold c̄ maps
 With several thresholds, the c̄ maps of the first one in THRESHOLD_FRAC are used
-unless a threshold is given.
+unless a threshold is given.  v8.5 results: the flames in OUTDIR/threshold_XX/
+are scanned and the table is saved there.
 """
 import os, sys, re, glob, csv, math
 import numpy as np
@@ -37,7 +38,7 @@ MAX_ITER       = 10
 WARN_SHIFT_PX  = 5      # flag flames whose centre differs more than this from NOZZLE_CENTER
 
 
-CBAR_NAME = "cbar.npy"    # set in main(): cbar_t25.npy etc. (v8.4+), cbar.npy (older)
+CBAR_NAME = "cbar.npy"    # set in main(): cbar_t25.npy (v8.4), cbar.npy (v8.5 and ≤ v8.3)
 
 
 def _cbar_path(posdir):
@@ -126,6 +127,9 @@ def main():
     root = sys.argv[1] if len(sys.argv) > 1 else W.OUTDIR
     t = float(sys.argv[2]) if len(sys.argv) > 2 else W.thresholds()[0]
     CBAR_NAME = f"cbar_{W.thr_tag(t)}.npy"
+    tdir = os.path.join(root, f"threshold_{W.thr_pct(t)}")
+    if os.path.isdir(tdir):                       # v8.5 layout: threshold → flame
+        root = tdir
     print(f"c̄ maps       : {CBAR_NAME} (threshold {W.thr_pct(t)} %), or cbar.npy for older results")
     if not os.path.isdir(root):
         print(f"ERROR: folder not found: {root}"); sys.exit(1)

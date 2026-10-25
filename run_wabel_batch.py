@@ -17,6 +17,9 @@ New in v8
   • Per-flame: "average composites" folder, c-lines .npz, Excel, settings log
   • Final ALL_conditions_results.xlsx over all flames
   • Run log file + warning summary
+v8.4  THRESHOLD_FRAC may be a list (sensitivity analysis), Excel grouped per threshold
+v8.5  Output folders threshold → flame: OUTDIR/threshold_25/<flame>/…,
+      shared bookkeeping in OUTDIR/_run_data/<flame>/; old layout migrated automatically
 
 Requires spe_reader.py in the same folder.  Python ≥ 3.8.
 """
@@ -125,7 +128,7 @@ try:
 except ImportError:
     _CONFIG_LOCAL = None
 
-SCRIPT_VERSION = "v8.4"
+SCRIPT_VERSION = "v8.5"
 
 # Settings baked into per-position products (logged, never auto-invalidated)
 PROCESSING_KEYS = ["SPATIAL_RES", "CROP_BOTTOM_MM", "CROP_TOP_MM", "NOISE_FLOOR",
@@ -159,10 +162,23 @@ def thresholds():
 def thr_pct(t):   return f"{t * 100:g}"                # 0.25 → "25"
 def thr_tag(t):   return f"t{thr_pct(t)}"              # "t25"
 def thr_label(t): return f"Threshold {thr_pct(t)}%"
-def thr_dir(fdir, t): return os.path.join(fdir, f"threshold_{thr_pct(t)}")
 def prod_key(kind, t): return f"{kind}_{thr_tag(t)}"   # "cbar_t25", "instant_t25"
-def cbar_file(pd, t):  return os.path.join(pd, f"cbar_{thr_tag(t)}.npy")
-def inst_file(pd, t):  return os.path.join(pd, f"instant_fronts_{thr_tag(t)}.npz")
+
+
+# ── output layout (v8.5): threshold → flame ──────────────────────────
+#   OUTDIR/threshold_25/<flame>/            everything that depends on the threshold
+#          threshold_25/<flame>/posN/       cbar.npy, instant_fronts.npz, maps, overlays
+#   OUTDIR/_run_data/<flame>/               bookkeeping shared by all thresholds
+#          _run_data/<flame>/posN/          done.json (resume marker), bg_mean.npy, settings
+RUN_DIR_NAME = "_run_data"
+
+def thr_root(t):              return os.path.join(OUTDIR, f"threshold_{thr_pct(t)}")
+def flame_dir(flame, t):      return os.path.join(thr_root(t), safe_name(flame))
+def thr_pos_dir(flame, p, t): return os.path.join(flame_dir(flame, t), f"pos{p}")
+def run_dir(flame):           return os.path.join(OUTDIR, RUN_DIR_NAME, safe_name(flame))
+def run_pos_dir(flame, p):    return os.path.join(run_dir(flame), f"pos{p}")
+def cbar_file(flame, p, t):   return os.path.join(thr_pos_dir(flame, p, t), "cbar.npy")
+def inst_file(flame, p, t):   return os.path.join(thr_pos_dir(flame, p, t), "instant_fronts.npz")
 
 
 def parse_prod(key):
@@ -559,10 +575,13 @@ def process_position(job):
            "error": None, "needs": job["needs"], "n_frames": 0, "seconds": 0.0}
     W = res["warnings"]
     try:
-        pd = job["pos_dir"]; os.makedirs(pd, exist_ok=True)
+        flame, pos = job["flame"], job["pos"]
+        pd = run_pos_dir(flame, pos); os.makedirs(pd, exist_ok=True)
         cbar_ts = [parse_prod(n)[1] for n in job["needs"] if parse_prod(n)[0] == "cbar"]
         inst_ts = [parse_prod(n)[1] for n in job["needs"] if parse_prod(n)[0] == "instant"]
         all_ts = sorted(set(cbar_ts) | set(inst_ts))
+        for t in all_ts:
+            os.makedirs(thr_pos_dir(flame, pos, t), exist_ok=True)
         need_cbar = bool(cbar_ts)
         need_inst = bool(inst_ts)
 
@@ -627,9 +646,9 @@ def process_position(job):
                         if g < OVERLAY_COUNT:
                             if SAVE_OVERLAY:
                                 save_overlay(img, front_from_u8(u8),
-                                             os.path.join(pd, f"overlay_{thr_tag(t)}_{g:04d}.png"))
+                                             os.path.join(thr_pos_dir(flame, pos, t), f"overlay_{g:04d}.png"))
                             if SAVE_DEBUG_BINARY:
-                                cv2.imwrite(os.path.join(pd, f"binary_{thr_tag(t)}_{g:04d}.png"), u8)
+                                cv2.imwrite(os.path.join(thr_pos_dir(flame, pos, t), f"binary_{g:04d}.png"), u8)
             n_used += info["n_frames"]
 
         if n_used == 0:
@@ -648,17 +667,17 @@ def process_position(job):
         now = datetime.datetime.now().isoformat(timespec="seconds")
         products = dict(job["keep_products"])
         for t in cbar_ts:
-            atomic_save_npy(cbar_file(pd, t), bsum[t] / n_used)
+            atomic_save_npy(cbar_file(flame, pos, t), bsum[t] / n_used)
             k = prod_key("cbar", t)
             products[k] = {"settings": product_settings(k), "finished": now,
                            "n_frames": n_used, "skipped_leading": skipped}
         for t in inst_ts:
-            tmp = inst_file(pd, t) + ".tmp"
+            tmp = inst_file(flame, pos, t) + ".tmp"
             with open(tmp, "wb") as f:
                 np.savez_compressed(f, fronts=np.array(fronts[t], dtype=bool),
                                     binaries=np.array(bins[t], dtype=bool),
                                     frame_index=np.array(fidx, dtype=np.int32))
-            os.replace(tmp, inst_file(pd, t))
+            os.replace(tmp, inst_file(flame, pos, t))
             k = prod_key("instant", t)
             products[k] = {"settings": product_settings(k), "finished": now,
                            "n_frames": len(fronts[t]), "n_requested": N_INSTANT,
@@ -784,35 +803,121 @@ def settings_diff(old, new):
             for k in new if old.get(k) != new.get(k)]
 
 
-def _migrate_legacy(pd, man):
-    """Pre-v8.4 results (one threshold): cbar.npy / instant_fronts.npz and
-    products 'cbar' / 'instant' → renamed to the per-threshold names."""
-    prods = man.get("products", {})
-    changed = False
-    for kind, old, newf in (("cbar", "cbar.npy", cbar_file),
-                            ("instant", "instant_fronts.npz", inst_file)):
-        if kind in prods:
-            t = prods[kind]["settings"].get("THRESHOLD_FRAC")
-            if isinstance(t, (list, tuple)) or t is None:
-                continue
-            src = os.path.join(pd, old)
-            if os.path.isfile(src) and not os.path.isfile(newf(pd, t)):
-                os.replace(src, newf(pd, t))
-            prods[prod_key(kind, float(t))] = prods.pop(kind)
-            changed = True
-    if changed:
-        man["products"] = prods
-        atomic_write_json(os.path.join(pd, "done.json"), man)
-        write_position_settings_txt(os.path.join(pd, f"settings_pos{man['pos']}.txt"), man)
-    return man
+_TAGGED_RE = re.compile(r"^(?P<a>.+?)_t(?P<pct>\d+(?:\.\d+)?)(?P<b>(?:_\d+)?)(?P<ext>\.\w+)$")
+_LEGACY_POS_FILES = re.compile(r"^(cbar\.npy|instant_fronts\.npz|cbar_map\.png|"
+                               r"overlay_\d+\.png|binary_\d+\.png)$")
 
 
-def plan_position(flame_dir, pos, ent):
+def _move(src, dst, notes):
+    """Move src → dst unless dst already exists (then src is left in place)."""
+    if os.path.exists(dst):
+        notes.append(f"not moved (already exists): {os.path.relpath(dst, OUTDIR)}")
+        return False
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.move(src, dst)
+    return True
+
+
+def _rmdir_if_empty(d):
+    try:
+        os.rmdir(d)
+        return True
+    except OSError:
+        return False
+
+
+def migrate_old_layout(flame, dry_run=False):
+    """Results written by v8.4 and older lived in OUTDIR/<flame>/ (flame →
+    threshold).  Move them into the v8.5 layout (threshold → flame):
+      <flame>/posN/cbar_t25.npy        → threshold_25/<flame>/posN/cbar.npy
+      <flame>/posN/overlay_t25_0000.png→ threshold_25/<flame>/posN/overlay_0000.png
+      <flame>/threshold_25/<sub>       → threshold_25/<flame>/<sub>
+      <flame>/posN/done.json, bg_mean  → _run_data/<flame>/posN/
+      everything else of <flame>/      → _run_data/<flame>/
+    Pre-v8.4 single-threshold files (cbar.npy, product key 'cbar') go to the
+    threshold recorded in done.json.  Returns a list of notes."""
+    old = os.path.join(OUTDIR, safe_name(flame))
+    if not os.path.isdir(old):
+        return []
+    entries = os.listdir(old)
+    if not any(re.fullmatch(r"pos\d+", e) or e.startswith("threshold_")
+               or e in ("flame_done.json", "flame_results.json") for e in entries):
+        return []
+    if dry_run:
+        return [f"old folder layout found ('{safe_name(flame)}/') → will be converted to "
+                f"threshold_XX/{safe_name(flame)}/ on the next real run"]
+    notes = []
+    legacy_t = None
+    # ── position folders ─────────────────────────────────────────────
+    for e in sorted(entries):
+        m = re.fullmatch(r"pos(\d+)", e)
+        if not m:
+            continue
+        p = int(m.group(1)); od = os.path.join(old, e)
+        man = load_json(os.path.join(od, "done.json"))
+        lt = None
+        if man is not None:
+            prods = man.get("products", {})
+            for kind in ("cbar", "instant"):            # pre-v8.4 product names
+                if kind in prods:
+                    t = prods[kind]["settings"].get("THRESHOLD_FRAC")
+                    v = prods.pop(kind)
+                    if not isinstance(t, (list, tuple)) and t is not None:
+                        lt = float(t); prods[prod_key(kind, lt)] = v
+            man["products"] = prods
+        legacy_t = legacy_t if lt is None else lt
+        for fn in sorted(os.listdir(od)):
+            src = os.path.join(od, fn)
+            tm = _TAGGED_RE.match(fn)
+            if tm and os.path.isfile(src):
+                t = float(tm.group("pct")) / 100.0
+                dst = os.path.join(thr_pos_dir(flame, p, t),
+                                   tm.group("a") + tm.group("b") + tm.group("ext"))
+            elif _LEGACY_POS_FILES.match(fn) and lt is not None:
+                dst = os.path.join(thr_pos_dir(flame, p, lt), fn)
+            elif fn == "done.json":
+                continue                                 # written below (updated)
+            else:
+                dst = os.path.join(run_pos_dir(flame, p), fn)
+            _move(src, dst, notes)
+        if man is not None:
+            os.makedirs(run_pos_dir(flame, p), exist_ok=True)
+            atomic_write_json(os.path.join(run_pos_dir(flame, p), "done.json"), man)
+            write_position_settings_txt(
+                os.path.join(run_pos_dir(flame, p), f"settings_pos{p}.txt"), man)
+            os.remove(os.path.join(od, "done.json"))
+        _rmdir_if_empty(od)
+    # ── per-threshold folders and flame-level files ──────────────────
+    legacy_dirs = (AVG_DIR_NAME, INST_DIR_NAME, INST_BIN_DIR_NAME)
+    for e in sorted(os.listdir(old)):
+        src = os.path.join(old, e)
+        tm = re.fullmatch(r"threshold_(\d+(?:\.\d+)?)", e)
+        if tm and os.path.isdir(src):
+            t = float(tm.group(1)) / 100.0
+            for sub in sorted(os.listdir(src)):
+                _move(os.path.join(src, sub), os.path.join(flame_dir(flame, t), sub), notes)
+            _rmdir_if_empty(src)
+        elif e in legacy_dirs and legacy_t is not None:    # pre-v8.4 composites
+            _move(src, os.path.join(flame_dir(flame, legacy_t), e), notes)
+        elif e.endswith("_results.xlsx"):
+            # old Excel with all thresholds side by side → kept for reference
+            _move(src, os.path.join(run_dir(flame), "old_" + e), notes)
+        elif e == "flame_done.json":
+            os.remove(src)                               # forces re-finalisation
+        else:
+            _move(src, os.path.join(run_dir(flame), e), notes)
+    if _rmdir_if_empty(old):
+        notes.insert(0, f"old folder layout converted → threshold_XX/{safe_name(flame)}/ "
+                        f"and {RUN_DIR_NAME}/{safe_name(flame)}/")
+    else:
+        notes.insert(0, f"old folder layout converted, but '{os.path.relpath(old, OUTDIR)}' "
+                        f"still contains files that could not be moved — check it")
+    return notes
+
+
+def plan_position(flame, pos, ent):
     """Return (needs, keep_products, notes)."""
-    pd = os.path.join(flame_dir, f"pos{pos}")
-    man = load_json(os.path.join(pd, "done.json"))
-    if man is not None:
-        man = _migrate_legacy(pd, man)
+    man = load_json(os.path.join(run_pos_dir(flame, pos), "done.json"))
     sig = json.loads(json.dumps(source_sig(ent)))
     notes = []
     valid = {}
@@ -825,7 +930,7 @@ def plan_position(flame_dir, pos, ent):
     for t in thresholds():
         if DO_CBAR:
             k = prod_key("cbar", t); p = valid.get(k)
-            if p and os.path.isfile(cbar_file(pd, t)):
+            if p and os.path.isfile(cbar_file(flame, pos, t)):
                 keep[k] = p
                 d = settings_diff(p["settings"], product_settings(k))
                 if d:
@@ -835,7 +940,7 @@ def plan_position(flame_dir, pos, ent):
                 needs.append(k)
         if DO_INSTANT:
             k = prod_key("instant", t); p = valid.get(k)
-            if (p and os.path.isfile(inst_file(pd, t))
+            if (p and os.path.isfile(inst_file(flame, pos, t))
                     and p.get("n_requested", 0) >= N_INSTANT):
                 keep[k] = p
             else:
@@ -847,7 +952,7 @@ def plan_position(flame_dir, pos, ent):
         kind, t = parse_prod(k)
         if t is None:
             continue
-        f = cbar_file(pd, t) if kind == "cbar" else inst_file(pd, t)
+        f = cbar_file(flame, pos, t) if kind == "cbar" else inst_file(flame, pos, t)
         if os.path.isfile(f):
             keep[k] = v
     return needs, keep, notes
@@ -994,9 +1099,9 @@ SCAN_MSG = {
 }
 
 
-def finalize_cbar(flame, F, fdir, positions, t):
+def finalize_cbar(flame, F, positions, t):
     pre = f"[thr {thr_pct(t)}%] " if len(thresholds()) > 1 else ""
-    pcb = {p: np.load(cbar_file(os.path.join(fdir, f"pos{p}"), t)) for p in positions}
+    pcb = {p: np.load(cbar_file(flame, p, t)) for p in positions}
     widths = {p: a.shape[1] for p, a in pcb.items()}
     if len(set(widths.values())) > 1:
         raise ValueError(f"positions have different image widths {widths}")
@@ -1009,7 +1114,7 @@ def finalize_cbar(flame, F, fdir, positions, t):
             cs = {lv: scan_cbar_contour(pcb[p], NOZZLE_CENTER, lv) for lv in CBAR_LEVELS}
             tips = contour_flame_height(cs, pcb[p].shape[0], SPATIAL_RES)
             draw_cbar(pcb[p], cs, tips,
-                      os.path.join(fdir, f"pos{p}", f"cbar_map_{thr_tag(t)}.png"),
+                      os.path.join(thr_pos_dir(flame, p, t), "cbar_map.png"),
                       pos_label=f"pos{p}  ({thr_label(t)})")
 
     C = build_cbar_composite(pcb, F["D"])
@@ -1029,7 +1134,7 @@ def finalize_cbar(flame, F, fdir, positions, t):
         log(f"    c̄={lv}: A_real={a[0]:.1f}  A_ext={a[1]:.1f}  A_total={a[2]:.1f} mm²  "
             f"h={h:.1f} mm  [{inf['status']}]")
 
-    ad = os.path.join(thr_dir(fdir, t), AVG_DIR_NAME); os.makedirs(ad, exist_ok=True)
+    ad = os.path.join(flame_dir(flame, t), AVG_DIR_NAME); os.makedirs(ad, exist_ok=True)
     base_t = (f"{flame}  {thr_label(t)}  (pos{min(positions)} bottom → pos{max(positions)} "
               f"top, NOZZLE_CENTER={NOZZLE_CENTER})")
     plot_avg_composite(C, [], os.path.join(ad, "composite_no_clines.png"), base_t)
@@ -1086,9 +1191,9 @@ def _spe_real_range(path):
     return start, meta["count"] - start, meta, fb
 
 
-def _position_bg(fdir, p, ent):
-    """Mean background of a position (cached as posN/bg_mean.npy)."""
-    cache = os.path.join(fdir, f"pos{p}", "bg_mean.npy")
+def _position_bg(flame, p, ent):
+    """Mean background of a position (cached as _run_data/<flame>/posN/bg_mean.npy)."""
+    cache = os.path.join(run_pos_dir(flame, p), "bg_mean.npy")
     if os.path.isfile(cache):
         return np.load(cache)
     if ent["bg"] is None:
@@ -1207,11 +1312,11 @@ def _best_chain(costs, avail):
     return chain
 
 
-def finalize_instant(flame, F, fdir, positions, t):
+def finalize_instant(flame, F, positions, t):
     pre = f"[thr {thr_pct(t)}%] " if len(thresholds()) > 1 else ""
     data = {}
     for p in positions:
-        z = np.load(inst_file(os.path.join(fdir, f"pos{p}"), t))
+        z = np.load(inst_file(flame, p, t))
         data[p] = (z["fronts"], z["binaries"], z["frame_index"])
     widths = {p: d[0].shape[2] for p, d in data.items()}
     if len(set(widths.values())) > 1:
@@ -1226,14 +1331,14 @@ def finalize_instant(flame, F, fdir, positions, t):
         costs.append(L.sum(1)[:, None] + U.sum(1)[None, :] - 2.0 * (L @ U.T))
     avail = [np.ones(data[p][0].shape[0], dtype=bool) for p in ps]
 
-    idir = os.path.join(thr_dir(fdir, t), INST_DIR_NAME); os.makedirs(idir, exist_ok=True)
-    bdir = os.path.join(thr_dir(fdir, t), INST_BIN_DIR_NAME); os.makedirs(bdir, exist_ok=True)
+    idir = os.path.join(flame_dir(flame, t), INST_DIR_NAME); os.makedirs(idir, exist_ok=True)
+    bdir = os.path.join(flame_dir(flame, t), INST_BIN_DIR_NAME); os.makedirs(bdir, exist_ok=True)
     for stale in (glob.glob(os.path.join(idir, "instant_binary_composite_*.npy"))
                   + ([] if INSTANT_AREA else
                      glob.glob(os.path.join(idir, "instant_front_inner_composite_*.npy"))
                      + glob.glob(os.path.join(bdir, "instant_front_inner_composite_*.npy")))):
         os.remove(stale)        # binary composites now live in instantaneous_binarized/
-    bgs = {p: _position_bg(fdir, p, F["positions"][p]) for p in ps}
+    bgs = {p: _position_bg(flame, p, F["positions"][p]) for p in ps}
     out = []
     for ci in range(1, N_INSTANT_COMPOSITES + 1):
         chain = _best_chain(costs, avail)
@@ -1355,7 +1460,7 @@ def finalize_instant(flame, F, fdir, positions, t):
 # ══════════════════════════════════════════════════════════════════════
 #  Settings log, Excel
 # ══════════════════════════════════════════════════════════════════════
-def build_settings_log(flame, fdir, positions, mans):
+def build_settings_log(flame, dirs, positions, mans):
     L = [f"USER SETTINGS LOG — {flame}",
          f"generated {datetime.datetime.now().isoformat(timespec='seconds')} "
          f"by run_wabel_batch.py {SCRIPT_VERSION}", "",
@@ -1401,8 +1506,10 @@ def build_settings_log(flame, fdir, positions, mans):
         for prod, v in sorted(m["products"].items()):
             L.append(f"        [{prod}] frames used = {v['n_frames']}, skipped leading "
                      f"empty = {v.get('skipped_leading', 0)}, finished {v['finished']}")
-    with open(os.path.join(fdir, "user_settings_log.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(L) + "\n")
+    for d in dirs:
+        if os.path.isdir(d):
+            with open(os.path.join(d, "user_settings_log.txt"), "w", encoding="utf-8") as f:
+                f.write("\n".join(L) + "\n")
 
 
 def A_hdr(lv): return f"A_(c̄={lv}) [mm²]"
@@ -1478,16 +1585,17 @@ def results_block(cb):
             + [round(cb["levels"][str(lv)]["h"], 2) for lv in lv_sorted])
 
 
-def grouped_results(flames_cb):
+def grouped_results(flames_cb, ts=None):
     """flames_cb: [(flame, {tag: cbar_result})] → (header, rows, groups),
     one column group per threshold: 'Threshold 25%' → A_(c̄=…)…, h_(c̄=…)…"""
+    ts = thresholds() if ts is None else ts
     lv_sorted = sorted(CBAR_LEVELS)
     block = [A_hdr(lv) for lv in lv_sorted] + [h_hdr(lv) for lv in lv_sorted]
     header, groups = ["Condition"], []
-    for t in thresholds():
+    for t in ts:
         groups.append((thr_label(t), len(header) + 1, len(block)))
         header += block
-    rows = [[f] + sum((results_block(cbd.get(thr_tag(t))) for t in thresholds()), [])
+    rows = [[f] + sum((results_block(cbd.get(thr_tag(t))) for t in ts), [])
             for f, cbd in flames_cb]
     return header, rows, groups
 
@@ -1499,49 +1607,43 @@ def instant_rows(inst):
             for i in (inst or [])]
 
 
-def write_flame_excel(flame, fdir, positions, mans, cbd, instd=None):
-    """cbd / instd: {threshold tag: result} for this flame."""
-    header, rows_, groups = grouped_results([(flame, cbd)])
+def write_flame_excel(flame, t, positions, mans, cb, inst=None):
+    """Excel of ONE flame at ONE threshold → threshold_XX/<flame>/<flame>_results.xlsx."""
+    tag = thr_tag(t)
+    header, rows_, groups = grouped_results([(flame, {tag: cb})], [t])
     sheets = [("Results", header, rows_, groups)]
-    irows = []
-    for t in thresholds():
-        for r in instant_rows((instd or {}).get(thr_tag(t))):
-            irows.append([f"{thr_pct(t)}%"] + r)
-    if any(r[2] != "" for r in irows):
-        sheets.append(("Instantaneous", ["threshold", "composite #",
-                                         "A_inst [mm²] (measured part only)",
+    irows = instant_rows(inst)
+    if any(r[1] != "" for r in irows):
+        sheets.append(("Instantaneous", ["composite #", "A_inst [mm²] (measured part only)",
                                          "frames used", "junction mismatch [px]"], irows))
     rows = []
-    for t in thresholds():
-        cb = cbd.get(thr_tag(t))
-        if not cb:
-            continue
-        for lv in sorted(CBAR_LEVELS):
-            d = cb["levels"][str(lv)]
-            rows.append([f"{thr_pct(t)}%", lv, round(d["A_real"], 2), round(d["A_ext"], 2),
-                         round(d["A_total"], 2), round(d["h"], 2), d["tip_row"], d["tip_col"],
-                         d["status"]])
-    sheets.append(("Area breakdown", ["threshold", "c̄ level", "A_real pos1+ [mm²]",
+    for lv in sorted(CBAR_LEVELS):
+        d = cb["levels"][str(lv)]
+        rows.append([lv, round(d["A_real"], 2), round(d["A_ext"], 2),
+                     round(d["A_total"], 2), round(d["h"], 2), d["tip_row"], d["tip_col"],
+                     d["status"]])
+    sheets.append(("Area breakdown", ["c̄ level", "A_real pos1+ [mm²]",
                                       "A_ext pos0 [mm²]", "A_total [mm²]", "h [mm]", "tip row",
                                       "tip col", "contour status"], rows))
     prow = []
     for p in positions:
-        m = mans[p]; c = m["products"].get(prod_key("cbar", thresholds()[0]), {})
+        m = mans[p]; c = m["products"].get(prod_key("cbar", t), {})
         prow.append([p, ", ".join(n for n, _ in m["sources"]["data"]),
                      m["sources"]["bg"][0] if m["sources"]["bg"] else "NONE",
                      c.get("n_frames", ""), c.get("skipped_leading", ""), c.get("finished", "")])
     sheets.append(("Positions", ["pos", "data file(s)", "bg file", "frames (c̄)",
                                  "skipped leading empty", "processed"], prow))
-    return write_table(os.path.join(fdir, f"{safe_name(flame)}_results.xlsx"), sheets)
+    return write_table(os.path.join(flame_dir(flame, t), f"{safe_name(flame)}_results.xlsx"),
+                       sheets)
 
 
 # ══════════════════════════════════════════════════════════════════════
 #  Flame finalisation (main process)
 # ══════════════════════════════════════════════════════════════════════
 def finalize_flame(flame, F):
-    fdir = os.path.join(OUTDIR, safe_name(flame))
+    rdir = run_dir(flame)
     positions = sorted(F["positions"])
-    mans = {p: load_json(os.path.join(fdir, f"pos{p}", "done.json")) for p in positions}
+    mans = {p: load_json(os.path.join(run_pos_dir(flame, p), "done.json")) for p in positions}
     missing = [p for p in positions if mans[p] is None]
     if missing:
         raise RuntimeError(f"positions {missing} have no completed results")
@@ -1550,10 +1652,11 @@ def finalize_flame(flame, F):
         {"analysis": current_settings(ANALYSIS_KEYS), "version": SCRIPT_VERSION,
          "pos": {str(p): mans[p] for p in positions}},
         sort_keys=True, default=str).encode()).hexdigest()
-    fdone = load_json(os.path.join(fdir, "flame_done.json"))
-    fres_path = os.path.join(fdir, "flame_results.json")
+    fdone = load_json(os.path.join(rdir, "flame_done.json"))
+    fres_path = os.path.join(rdir, "flame_results.json")
     if (not REBUILD_FINISHED_FLAMES and fdone and fdone.get("hash") == fhash
-            and os.path.isfile(fres_path)):
+            and os.path.isfile(fres_path)
+            and all(os.path.isdir(flame_dir(flame, t)) for t in thresholds())):
         log(f"[{_ts()}]   {flame}: composites/Excel up to date → skipped")
         return load_json(fres_path)
 
@@ -1570,41 +1673,49 @@ def finalize_flame(flame, F):
             log(f"  ── {thr_label(t)} ──")
         if DO_CBAR:
             if all(prod_key("cbar", t) in mans[p]["products"] for p in positions):
-                result["cbar"][thr_tag(t)] = finalize_cbar(flame, F, fdir, positions, t)
+                result["cbar"][thr_tag(t)] = finalize_cbar(flame, F, positions, t)
             else:
                 warn(flame, f"c̄ results ({thr_pct(t)}%) missing for some positions "
                             "→ no c-line output")
         if DO_INSTANT:
             if all(prod_key("instant", t) in mans[p]["products"] for p in positions):
-                result["instant"][thr_tag(t)] = finalize_instant(flame, F, fdir, positions, t)
+                result["instant"][thr_tag(t)] = finalize_instant(flame, F, positions, t)
             else:
                 warn(flame, f"instantaneous fronts ({thr_pct(t)}%) missing for some positions")
-    if result["cbar"]:
-        x = write_flame_excel(flame, fdir, positions, mans, result["cbar"], result["instant"])
-        log(f"    Excel → {x}")
-    build_settings_log(flame, fdir, positions, mans)
+    for t in thresholds():
+        cb = result["cbar"].get(thr_tag(t))
+        if cb:
+            x = write_flame_excel(flame, t, positions, mans, cb, result["instant"].get(thr_tag(t)))
+            log(f"    Excel → {x}")
+    build_settings_log(flame, [rdir] + [flame_dir(flame, t) for t in thresholds()],
+                       positions, mans)
     atomic_write_json(fres_path, result)
-    atomic_write_json(os.path.join(fdir, "flame_done.json"),
+    atomic_write_json(os.path.join(rdir, "flame_done.json"),
                       {"hash": fhash, "finished": datetime.datetime.now().isoformat(timespec="seconds")})
-    log(f"[{_ts()}] ✔ {flame} finalised in {time.time() - t0:.0f} s → {fdir}")
+    log(f"[{_ts()}] ✔ {flame} finalised in {time.time() - t0:.0f} s → "
+        + ", ".join(os.path.relpath(flame_dir(flame, t), OUTDIR) for t in thresholds()))
     return result
 
 
-def write_master(flames, results, status):
+def write_master(flames, results, status, ts=None, path=None):
+    """Combined Excel over all flames.  Default: all thresholds side by side
+    → OUTDIR/ALL_conditions_results.xlsx; with ts=[t]: one threshold."""
     if not DO_CBAR:
         log("DO_CBAR is off → no combined c-line Excel.")
         return
+    ts = thresholds() if ts is None else ts
+    path = path or os.path.join(OUTDIR, "ALL_conditions_results.xlsx")
     def cbd_of(r):
         c = (r or {}).get("cbar") or {}
         return c if all(k.startswith("t") for k in c) else {}   # pre-v8.4 results: ignore
 
     header, rows, groups = grouped_results(
-        [(f, cbd_of(results.get(f))) for f in flames if cbd_of(results.get(f))])
+        [(f, cbd_of(results.get(f))) for f in flames if cbd_of(results.get(f))], ts)
     st_rows = []
     for f in flames:
         r = results.get(f) or {}
         cbs = []
-        for t in thresholds():
+        for t in ts:
             cb = cbd_of(r).get(thr_tag(t))
             if cb:
                 bad = [f"{lv}:{d['status']}" for lv, d in cb["levels"].items()
@@ -1618,7 +1729,7 @@ def write_master(flames, results, status):
     iblock = (["A_inst mean [mm²]", "A_inst std [mm²]", "n"]
               + [f"A_real (c̄={lv}) [mm²]" for lv in sorted(CBAR_LEVELS)])
     iheader, igroups = ["Condition"], []
-    for t in thresholds():
+    for t in ts:
         igroups.append((thr_label(t), len(iheader) + 1, len(iblock)))
         iheader += iblock
     inst_rows = []
@@ -1626,7 +1737,7 @@ def write_master(flames, results, status):
         r = results.get(f) or {}
         instd = (r.get("instant") or {}) if isinstance(r.get("instant"), dict) else {}
         row, any_val = [f], False
-        for t in thresholds():
+        for t in ts:
             vals = [i["A_inst_mm2"] for i in (instd.get(thr_tag(t)) or []) if "A_inst_mm2" in i]
             cb = cbd_of(r).get(thr_tag(t))
             a_real = ([round(cb["levels"][str(lv)]["A_real"], 2) for lv in sorted(CBAR_LEVELS)]
@@ -1640,7 +1751,7 @@ def write_master(flames, results, status):
         if any_val:
             inst_rows.append(row)
     extra = [("Instantaneous A", iheader, inst_rows, igroups)] if inst_rows else []
-    x = write_table(os.path.join(OUTDIR, "ALL_conditions_results.xlsx"),
+    x = write_table(path,
                     [("All conditions", header, rows, groups)] + extra + [
                      ("Run status", ["Condition", "status", "positions", "missing positions",
                                      "positions without bg", "c-lines not closed",
@@ -1725,19 +1836,20 @@ def main():
     log(f"\n{'=' * 72}\nRESUME SCAN")
     jobs = []; pending = {}; skipped_pos = {}
     for f, F in flames.items():
-        fdir = os.path.join(OUTDIR, safe_name(f))
+        for n in migrate_old_layout(f, DRY_RUN):
+            warn(f, n)
         pending[f] = set(); skipped_pos[f] = set()
         parts = []
         for pos, ent in F["positions"].items():
             if ent["bg"] is None and MISSING_BG_ACTION == "skip":
                 skipped_pos[f].add(pos); parts.append(f"pos{pos}:SKIP(no bg)"); continue
-            needs, keep, notes = plan_position(fdir, pos, ent)
+            needs, keep, notes = plan_position(f, pos, ent)
             for n in notes:
                 warn(f, f"pos{pos}: {n}")
             if needs:
                 pending[f].add(pos)
                 jobs.append({"flame": f, "pos": pos, "spe_paths": ent["data"],
-                             "bg_path": ent["bg"], "pos_dir": os.path.join(fdir, f"pos{pos}"),
+                             "bg_path": ent["bg"],
                              "needs": needs, "keep_products": keep,
                              "sources": source_sig(ent)})
                 parts.append(f"pos{pos}:[{needs_str(needs)}]")
@@ -1821,6 +1933,11 @@ def main():
             pool.close(); pool.join()
 
     write_master(flames, results, status)
+    if len(thresholds()) > 1:                 # one combined Excel per threshold folder too
+        for t in thresholds():
+            os.makedirs(thr_root(t), exist_ok=True)
+            write_master(flames, results, status, [t],
+                         os.path.join(thr_root(t), f"ALL_conditions_results_{thr_pct(t)}.xlsx"))
 
     log(f"\n{'=' * 72}\nSUMMARY  (total {fmt_dur(time.time() - t_start)})")
     for f in flames:
