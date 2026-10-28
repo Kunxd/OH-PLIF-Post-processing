@@ -20,7 +20,19 @@ ONLY_FLAMES = []       # e.g. ["CH4_Re15000_phi1"] → only flames whose name co
 EXCLUDE_FLAMES = []    # e.g. ["Re26992"] → skip flames whose name contains this
 DUPLICATE_POLICY = "average"   # same position recorded twice: "average", "newest" or "oldest"
 
-# Examples of other overrides:
-# NOZZLE_CENTER = 552
-# CBAR_LEVELS   = [0.4, 0.5, 0.6, 0.7]
+# ── Image geometry ────────────────────────────────────────────────
+# Crops are given in mm and converted to pixels with SPATIAL_RES.
+# They remove the overlap between positions: each cropped strip should be
+# exactly one traverse step tall (field of view − CROP_TOP − CROP_BOTTOM = step).
+# Changing these changes the frame processing → use a new OUTDIR.
+SPATIAL_RES    = 0.05   # mm per pixel  (e.g. 1/18.4 for 18.4 px/mm)
+CROP_BOTTOM_MM = 7.75   # cut off at the bottom of every frame [mm]
+CROP_TOP_MM    = 1.0    # cut off at the top of every frame [mm]
+NOZZLE_CENTER  = 552    # flame axis: pixel COLUMN counted from the LEFT edge
+POS1_OFFSET_MM = 0      # nozzle exit → bottom of the cropped pos1 strip [mm]; 0 = no pos0 part
+
+# ── c-lines ───────────────────────────────────────────────────────
+CBAR_LEVELS    = [0.4, 0.5, 0.6, 0.7]
+
+# Other overrides, e.g.:
 # REBUILD_FINISHED_FLAMES = True
