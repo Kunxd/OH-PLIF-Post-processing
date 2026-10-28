@@ -28,8 +28,10 @@ DUPLICATE_POLICY = "average"   # same position recorded twice: "average", "newes
 SPATIAL_RES    = 0.05   # mm per pixel  (e.g. 1/18.4 for 18.4 px/mm)
 CROP_BOTTOM_MM = 7.75   # cut off at the bottom of every frame [mm]
 CROP_TOP_MM    = 1.0    # cut off at the top of every frame [mm]
+CROP_BOTTOM_POS1 = True # False: keep the bottom of pos1 (no position below it to overlap)
 NOZZLE_CENTER  = 552    # flame axis: pixel COLUMN counted from the LEFT edge
-POS1_OFFSET_MM = 0      # nozzle exit → bottom of the cropped pos1 strip [mm]; 0 = no pos0 part
+POS1_OFFSET_MM = 0      # nozzle exit → bottom of the pos1 strip [mm] (uncropped bottom if
+                        # CROP_BOTTOM_POS1 = False); 0 = no pos0 part
 
 # ── c-lines ───────────────────────────────────────────────────────
 CBAR_LEVELS    = [0.4, 0.5, 0.6, 0.7]

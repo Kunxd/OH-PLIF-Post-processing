@@ -93,6 +93,9 @@ FRONT_SMOOTH_PX = 5      # smoothing window [px] along the front when measuring 
 SPATIAL_RES     = 0.05
 CROP_BOTTOM_MM  = 7.75
 CROP_TOP_MM     = 1.0
+CROP_BOTTOM_POS1 = True  # False: do NOT cut CROP_BOTTOM_MM off pos1 (nothing overlaps
+                         # below pos1) → pos1 reaches further down; POS1_OFFSET_MM is
+                         # then measured to the bottom of the UNcropped pos1 image
 NOISE_FLOOR     = 10
 WINDOW_SIZE     = 51
 THRESHOLD_FRAC  = 0.25   # one value, or several: [0.25, 0.30] → everything is
@@ -128,7 +131,7 @@ try:
 except ImportError:
     _CONFIG_LOCAL = None
 
-SCRIPT_VERSION = "v8.5"
+SCRIPT_VERSION = "v8.6"
 
 # Settings baked into per-position products (logged, never auto-invalidated)
 PROCESSING_KEYS = ["SPATIAL_RES", "CROP_BOTTOM_MM", "CROP_TOP_MM", "NOISE_FLOOR",
@@ -189,11 +192,13 @@ def parse_prod(key):
     return key, None
 
 
-def product_settings(product):
+def product_settings(product, pos=None):
     kind, t = parse_prod(product)
     keys = PROCESSING_KEYS + (INSTANT_KEYS if kind == "instant" else [])
     st = current_settings(keys)
     st["THRESHOLD_FRAC"] = t if t is not None else thresholds()[0]
+    if pos == 1:                       # only pos1 depends on this toggle
+        st["CROP_BOTTOM_POS1"] = CROP_BOTTOM_POS1
     return st
 
 
@@ -265,8 +270,10 @@ def wabel_local_threshold(img, ws, frac, n):
     return work > 0
 
 
-def crop_frame(frame):
+def crop_frame(frame, pos=None):
     cb, ct = crop_px()
+    if pos == 1 and not CROP_BOTTOM_POS1:
+        cb = 0                         # keep the bottom of pos1
     h = frame.shape[0]; t = ct; b = h - cb
     return frame[t:b] if b > t else frame
 
@@ -628,7 +635,7 @@ def process_position(job):
                     np.maximum(arr, 0, out=arr)
                 for j in range(arr.shape[0]):
                     g = n_used + i0 + j
-                    img = to_uint8(crop_frame(arr[j]))
+                    img = to_uint8(crop_frame(arr[j], pos))
                     take_inst = need_inst and len(fidx) < N_INSTANT
                     if take_inst:
                         fidx.append(g)
@@ -669,7 +676,7 @@ def process_position(job):
         for t in cbar_ts:
             atomic_save_npy(cbar_file(flame, pos, t), bsum[t] / n_used)
             k = prod_key("cbar", t)
-            products[k] = {"settings": product_settings(k), "finished": now,
+            products[k] = {"settings": product_settings(k, pos), "finished": now,
                            "n_frames": n_used, "skipped_leading": skipped}
         for t in inst_ts:
             tmp = inst_file(flame, pos, t) + ".tmp"
@@ -679,7 +686,7 @@ def process_position(job):
                                     frame_index=np.array(fidx, dtype=np.int32))
             os.replace(tmp, inst_file(flame, pos, t))
             k = prod_key("instant", t)
-            products[k] = {"settings": product_settings(k), "finished": now,
+            products[k] = {"settings": product_settings(k, pos), "finished": now,
                            "n_frames": len(fronts[t]), "n_requested": N_INSTANT,
                            "skipped_leading": skipped}
         man = {"flame": job["flame"], "pos": job["pos"], "sources": job["sources"],
@@ -798,9 +805,13 @@ def source_sig(ent):
                    if ent["bg"] else None)}
 
 
+SETTING_DEFAULTS = {"CROP_BOTTOM_POS1": True}   # value assumed for results made before a key existed
+
+
 def settings_diff(old, new):
-    return [f"{k}: {old.get(k)!r} → current {new.get(k)!r}"
-            for k in new if old.get(k) != new.get(k)]
+    get = lambda k: old.get(k, SETTING_DEFAULTS.get(k))
+    return [f"{k}: {get(k)!r} → current {new.get(k)!r}"
+            for k in new if get(k) != new.get(k)]
 
 
 _TAGGED_RE = re.compile(r"^(?P<a>.+?)_t(?P<pct>\d+(?:\.\d+)?)(?P<b>(?:_\d+)?)(?P<ext>\.\w+)$")
@@ -932,7 +943,7 @@ def plan_position(flame, pos, ent):
             k = prod_key("cbar", t); p = valid.get(k)
             if p and os.path.isfile(cbar_file(flame, pos, t)):
                 keep[k] = p
-                d = settings_diff(p["settings"], product_settings(k))
+                d = settings_diff(p["settings"], product_settings(k, pos))
                 if d:
                     notes.append(f"c̄ ({thr_pct(t)}%) done with different settings "
                                  "(NOT reprocessed): " + "; ".join(d))
@@ -1106,7 +1117,9 @@ def finalize_cbar(flame, F, positions, t):
     if len(set(widths.values())) > 1:
         raise ValueError(f"positions have different image widths {widths}")
     heights = {p: a.shape[0] for p, a in pcb.items()}
-    if len(set(heights.values())) > 1:
+    # pos1 is taller on purpose when its bottom is not cropped
+    cmp_h = {p: h for p, h in heights.items() if not (p == 1 and not CROP_BOTTOM_POS1)}
+    if len(set(cmp_h.values())) > 1:
         warn(flame, f"positions have different heights {heights}")
 
     if SAVE_POSITION_CBAR_MAPS:
@@ -1203,7 +1216,7 @@ def _position_bg(flame, p, ent):
     return bg
 
 
-def read_raw_instant_frame(ent, g, bg):
+def read_raw_instant_frame(ent, g, bg, pos=None):
     """Frame g (index as stored in instant_fronts.npz, counted over the
     position's data files after leading empty frames) → bg-subtracted,
     clipped at 0, cropped float32 image.  Returns (img, file, frame_in_file)."""
@@ -1218,7 +1231,7 @@ def read_raw_instant_frame(ent, g, bg):
             if bg is not None:
                 b = bg if bg.shape == img.shape else bg[:img.shape[0], :img.shape[1]]
                 img = np.maximum(img - b, 0)
-            return crop_frame(img), os.path.basename(path), int(start + g)
+            return crop_frame(img, pos), os.path.basename(path), int(start + g)
         g -= n
     raise IndexError("instantaneous frame index beyond the data files")
 
@@ -1360,7 +1373,7 @@ def finalize_instant(flame, F, positions, t):
             fr[0, :] = False; fr[-1, :] = False; fr[:, 0] = False; fr[:, -1] = False
             fr_strips.append(fr); bi_strips.append(data[p][1][chain[k]])
             g = int(data[p][2][chain[k]])
-            raw, fname, fidx = read_raw_instant_frame(F["positions"][p], g, bgs[p])
+            raw, fname, fidx = read_raw_instant_frame(F["positions"][p], g, bgs[p], p)
             if raw.shape != fr.shape:
                 raise ValueError(f"pos{p}: raw frame shape {raw.shape} ≠ stored front "
                                  f"shape {fr.shape}")
@@ -1492,7 +1505,7 @@ def build_settings_log(flame, dirs, positions, mans):
     diffs = []
     for p in positions:
         for prod, v in sorted(mans[p]["products"].items()):
-            d = settings_diff(v["settings"], product_settings(prod))
+            d = settings_diff(v["settings"], product_settings(prod, p))
             if d:
                 diffs.append(f"pos{p} [{prod}]: " + "; ".join(d))
     L.append("=== Positions processed with settings different from the CURRENT config "
