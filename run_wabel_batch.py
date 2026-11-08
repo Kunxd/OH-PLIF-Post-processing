@@ -38,6 +38,7 @@ import cv2
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as path_effects
 from matplotlib.lines import Line2D
 from matplotlib.colors import LinearSegmentedColormap
 
@@ -117,6 +118,13 @@ CBAR_LEVELS     = [0.4, 0.5, 0.6, 0.7]
 CLOSE_THRESHOLD = 5
 MARK_FLAME_HEIGHT = True
 POS1_OFFSET_MM    = 20   # nozzle exit → bottom of pos1 [mm]; 0 disables pos0
+DEBUG_CLINE_DISTANCE = False  # True: average composites show the distance nozzle axis →
+                         # finished c-line (px and mm) at the bottom of pos0 and pos1.
+                         # Picture only, no effect on A / h / Excel.
+DEBUG_SYNTH_AXIS  = False  # True: average composites also show a synthetic midline (mean
+                         # left/right c-line midpoint over the lowest rows of pos1) and a
+                         # second pos0 c-line bridged to that axis ± D/2.  Picture only.
+DEBUG_SYNTH_AXIS_ROWS = 5  # pos1 rows, counted up from its bottom, used for that midline
 
 # ╔════════════════════════════════════════════════════════════════════╗
 # ║                  END OF CONFIG                                     ║
@@ -1012,6 +1020,98 @@ def draw_cbar(cbar, contours_by_level, tips, path, pos_label=None):
     fig.tight_layout(); fig.savefig(path, bbox_inches='tight', dpi=150); plt.close(fig)
 
 
+def _px_mm(px):
+    return f"{px:g} px / {px * SPATIAL_RES:.2f} mm"
+
+
+def annotate_cline_distances(ax, C, levels):
+    """DEBUG_CLINE_DISTANCE: mark the horizontal distance NOZZLE_CENTER → finished
+    c-line pixel at the bottom row of the lowest measured position and of pos0.
+    Reads the same contour arrays that are revolved for A.  At the pos0 bottom the
+    c-line is set to NOZZLE_CENTER ± D/2 by extend_contours_to_nozzle(), so only the
+    measured-position row is an independent check."""
+    nc = NOZZLE_CENTER
+    rows = [(C["h_real"] - 1, f"pos{C['pos_boundaries'][-1][1]} bottom")]
+    if C["ext_px"] > 0:
+        rows.append((C["composite"].shape[0] - 1, "pos0 bottom"))
+    D = "?" if C["nozzle_diam"] is None else f"{C['nozzle_diam']:g}"
+    for row, name in rows:
+        lines = [f"{name} (row {row})", f"axis={nc} px  {SPATIAL_RES:.5f} mm/px  D={D} mm"]
+        for level in sorted(levels):
+            color, _ = level_color(level)
+            found = []
+            for pts in C["contours"][level]:
+                hit = pts[pts[:, 1] == row, 0] if len(pts) else []
+                found.append(int(hit[0]) if len(hit) else None)
+                if found[-1] is not None:
+                    ax.plot([nc, found[-1]], [row, row], '-', color=color, linewidth=0.8, zorder=6)
+                    ax.plot(found[-1], row, '|', color=color, markersize=9,
+                            markeredgewidth=1.5, zorder=6)
+            lx, rx = found
+            left = "n/a" if lx is None else _px_mm(nc - lx)
+            right = "n/a" if rx is None else _px_mm(rx - nc)
+            lines.append(f"c̄={level}  L {left}   R {right}")
+            if lx is not None and rx is not None:
+                shift = (lx + rx) / 2.0 - nc
+                where = ("on axis" if shift == 0 else
+                         f"{_px_mm(abs(shift))} {'left' if shift < 0 else 'right'} of axis")
+                lines += [f"  width {_px_mm(rx - lx)}", f"  centre {where}"]
+        ax.text(8, row - 8, "\n".join(lines), ha='left', va='bottom', fontsize=7,
+                family='monospace', color='black', zorder=7,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.85,
+                          edgecolor='none'))
+
+
+SYNTH_AXIS_COLOR = 'chartreuse'
+SYNTH_POS0_COLOR = 'white'      # drawn with a black outline so it also shows in the legend
+
+
+def synthetic_axis_column(left, right, first_row):
+    """Mean of (left + right) / 2 over the rows >= first_row where both arms exist."""
+    lx = {int(y): int(x) for x, y in left if y >= first_row}
+    rx = {int(y): int(x) for x, y in right if y >= first_row}
+    mids = [(lx[y] + rx[y]) / 2.0 for y in lx if y in rx]
+    return float(np.mean(mids)) if mids else None
+
+
+def draw_synthetic_axis(ax, C, levels):
+    """DEBUG_SYNTH_AXIS: overlay the midline of the lowest rows of pos1 and a second pos0
+    c-line bridged to that midline ± D/2.  Uses the ray-scanned c-lines (no pos0 part).
+    Picture only: NOZZLE_CENTER, the original c-lines, A and h are not touched.
+    Returns the legend handles."""
+    h_real = C["h_real"]
+    first_row = max(h_real - DEBUG_SYNTH_AXIS_ROWS, C["pos_boundaries"][-1][0])
+    outline = [path_effects.withStroke(linewidth=2.8, foreground='black')]
+    handles, bridged = [], False
+    for level in sorted(levels):
+        left, right = C["contours_real"][level]
+        xs = synthetic_axis_column(left, right, first_row)
+        if xs is None:
+            handles.append(Line2D([0], [0], color=SYNTH_AXIS_COLOR, linestyle='-.',
+                                  label=f'synthetic axis c̄={level}: no row with both arms'))
+            continue
+        dx = xs - NOZZLE_CENTER
+        ax.axvline(x=xs, color=SYNTH_AXIS_COLOR, linestyle='-.', linewidth=1.2, zorder=4)
+        handles.append(Line2D([0], [0], color=SYNTH_AXIS_COLOR, linestyle='-.', linewidth=1.2,
+                              label=f'synthetic axis c̄={level}: x={xs:.1f} px '
+                                    f'({dx:+.1f} px / {dx * SPATIAL_RES:+.2f} mm from axis)'))
+        if C["ext_px"] > 0:
+            new = extend_contours_to_nozzle(left, right, xs, C["nozzle_diam"], SPATIAL_RES,
+                                            h_real, C["ext_px"])
+            for pts, real_pts in zip(new, (left, right)):
+                seg = pts[max(len(real_pts) - 1, 0):]    # bridge only, from the last real point
+                if len(seg) >= 2:
+                    ax.plot(seg[:, 0], seg[:, 1], '-', color=SYNTH_POS0_COLOR, linewidth=1.5,
+                            path_effects=outline, zorder=1.5)   # under the original c-line
+                    bridged = True
+    if bridged:
+        handles.append(Line2D([0], [0], color=SYNTH_POS0_COLOR, linewidth=1.5,
+                              path_effects=outline,
+                              label=f'new pos0 c-line (synthetic axis ± D/2); axis from '
+                                    f'rows {first_row}–{h_real - 1}'))
+    return handles
+
+
 def plot_avg_composite(C, levels, path, title):
     comp = C["composite"]
     fig, ax = plt.subplots(1, 1, figsize=(10, comp.shape[0] / comp.shape[1] * 10), dpi=150)
@@ -1046,6 +1146,10 @@ def plot_avg_composite(C, levels, path, title):
             hm, tr, tc = C["tips"][level]
             if tr < comp.shape[0] - 1:
                 ax.plot(tc, tr, 'o', color=mcolor, markersize=6, zorder=5)
+    if DEBUG_CLINE_DISTANCE and levels:
+        annotate_cline_distances(ax, C, levels)
+    if DEBUG_SYNTH_AXIS and levels:
+        legend_items += draw_synthetic_axis(ax, C, levels)
     if legend_items:
         ax.legend(handles=legend_items, loc='upper right', fontsize=9, framealpha=0.8)
     ax.set_title(title, fontsize=9)
@@ -1661,10 +1765,13 @@ def finalize_flame(flame, F):
     if missing:
         raise RuntimeError(f"positions {missing} have no completed results")
 
-    fhash = hashlib.sha1(json.dumps(
-        {"analysis": current_settings(ANALYSIS_KEYS), "version": SCRIPT_VERSION,
-         "pos": {str(p): mans[p] for p in positions}},
-        sort_keys=True, default=str).encode()).hexdigest()
+    hash_src = {"analysis": current_settings(ANALYSIS_KEYS), "version": SCRIPT_VERSION,
+                "pos": {str(p): mans[p] for p in positions}}
+    if DEBUG_CLINE_DISTANCE:   # only when on, so finished flames are not redone for a debug option
+        hash_src["debug_cline_distance"] = True
+    if DEBUG_SYNTH_AXIS:
+        hash_src["debug_synth_axis_rows"] = DEBUG_SYNTH_AXIS_ROWS
+    fhash = hashlib.sha1(json.dumps(hash_src, sort_keys=True, default=str).encode()).hexdigest()
     fdone = load_json(os.path.join(rdir, "flame_done.json"))
     fres_path = os.path.join(rdir, "flame_results.json")
     if (not REBUILD_FINISHED_FLAMES and fdone and fdone.get("hash") == fhash

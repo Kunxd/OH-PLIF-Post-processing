@@ -35,6 +35,10 @@ POS1_OFFSET_MM = 0      # nozzle exit → bottom of the pos1 strip [mm] (uncropp
 
 # ── c-lines ───────────────────────────────────────────────────────
 CBAR_LEVELS    = [0.4, 0.5, 0.6, 0.7]
+DEBUG_CLINE_DISTANCE = False   # True: composites show axis → c-line distance (px, mm) at the
+                               # bottom of pos0 and pos1; finished flames are re-finalised once
+DEBUG_SYNTH_AXIS = False       # True: composites also show a midline from the lowest pos1 rows
+DEBUG_SYNTH_AXIS_ROWS = 5      # and a second pos0 c-line bridged to it (picture only)
 
 # Other overrides, e.g.:
 # REBUILD_FINISHED_FLAMES = True
