@@ -3,3 +3,4 @@ scipy
 opencv-python-headless
 matplotlib
 openpyxl
+scikit-image   # only for compare_binarisation.py / wabel_watershed.py

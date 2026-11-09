@@ -42,3 +42,14 @@ DEBUG_SYNTH_AXIS_ROWS = 5      # and a second pos0 c-line bridged to it (picture
 
 # Other overrides, e.g.:
 # REBUILD_FINISHED_FLAMES = True
+
+# ── compare_binarisation.py (moving window vs. Wabel's watershed) ─
+# Uses all settings above; these extra keys are only read by that script.
+COMPARE_FLAMES     = []     # e.g. ["CH4_Re15000_phi1"]; [] → ONLY/EXCLUDE/MAX_FLAMES, else first flame
+COMPARE_MAX_FRAMES = 200    # frames per position (None = all; watershed ≈ 1–2 s per frame)
+# COMPARE_THRESHOLD    = 0.25   # default: first value of THRESHOLD_FRAC
+# COMPARE_N_SAMPLES    = 3      # sample frames per position saved as pictures
+# WATERSHED_PRE_MEDIAN = 3      # median filter [px] on the ridge-finding image (0 = off)
+# WATERSHED_CONNECTIVITY = 1    # 1 = 4-neighbourhood, 2 = 8-neighbourhood
+# WATERSHED_N_ITER     = None   # passes; None = N_ITER of run_wabel_batch.py
+# COMPARE_OUTDIR       = None   # None → OUTDIR/binarisation_comparison/threshold_XX

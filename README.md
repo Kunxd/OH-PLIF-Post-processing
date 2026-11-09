@@ -13,6 +13,8 @@ surface area by revolution and flame height. S_T = ṁ / (ρ_u · A).
 | `spe_reader.py` | LightField / WinSpec `.spe` reader |
 | `estimate_nozzle_center.py` | estimates each flame's nozzle centre from the saved c̄ maps |
 | `white_bg.py` | supervisor's core-isolation script, unchanged; only an added block that reads `OUTDIR` from `config_local.py` and saves figures to `OUTDIR/white_bg/`. `python3 white_bg.py` = original synthetic test, `--real` = binarized frames under `OUTDIR` |
+| `compare_binarisation.py` | runs the moving-window threshold (pipeline) and Wabel's watershed threshold (`wabel_watershed.py`) side by side on the same frames, through the same chain; compares c̄, c-lines, A and h. Writes only to its own folder |
+| `wabel_watershed.py` | Wabel's PhD-thesis local threshold: each pixel vs. the signal at the nearest watershed ridge (needs scikit-image) |
 | `config_local.example.py` | template for your machine-specific settings |
 
 ## Setup (once per computer)
@@ -30,6 +32,20 @@ python3 run_wabel_batch.py
 ```
 Set `DRY_RUN = True` in `config_local.py` first to check which flames and
 positions are found. An interrupted run is resumed by simply starting it again.
+
+### Binarisation comparison (optional)
+```bash
+pip3 install scikit-image
+python3 compare_binarisation.py
+```
+Reads the same `config_local.py`. Choose the flames with `COMPARE_FLAMES`
+(default: first flame only) and the frames per position with
+`COMPARE_MAX_FRAMES` (default 200; the watershed needs about 1–2 s per frame,
+the window about 0.04 s). Output goes to `OUTDIR/binarisation_comparison/threshold_XX/`:
+`comparison_all_flames.xlsx`, and per flame `<flame>_comparison.xlsx`
+(A and h of both methods per c̄ level, differences, mean contour distance),
+`clines_window_vs_watershed.png`, `cbar_difference.png` and sample frames per
+position. The results of `run_wabel_batch.py` are not touched. Resumable like the main script.
 
 ## Input naming
 `<flame name>_pos<N> <anything>.spe` for data, `<flame name>_pos<N>_bg <anything>.spe`
