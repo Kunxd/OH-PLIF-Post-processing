@@ -9,7 +9,7 @@ surface area by revolution and flame height. S_T = ṁ / (ρ_u · A).
 ## Files
 | file | purpose |
 |---|---|
-| `run_wabel_batch.py` | main batch script (v8): all flames, parallel, resumable |
+| `main.py` | main batch script (v8): all flames, parallel, resumable. Called `run_wabel_batch.py` up to Nov 2026; same code, only renamed |
 | `spe_reader.py` | LightField / WinSpec `.spe` reader |
 | `estimate_nozzle_center.py` | estimates each flame's nozzle centre from the saved c̄ maps |
 | `white_bg.py` | supervisor's core-isolation script, unchanged; only an added block that reads `OUTDIR` from `config_local.py` and saves figures to `OUTDIR/white_bg/`. `python3 white_bg.py` = original synthetic test, `--real` = binarized frames under `OUTDIR` |
@@ -26,7 +26,7 @@ cp config_local.example.py config_local.py   # then edit paths in config_local.p
 ## Run
 ```bash
 git pull                     # get the latest version
-python3 run_wabel_batch.py
+python3 main.py
 ```
 Set `DRY_RUN = True` in `config_local.py` first to check which flames and
 positions are found. An interrupted run is resumed by simply starting it again.

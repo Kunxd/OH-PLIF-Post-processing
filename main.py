@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_wabel_batch.py  (v8 — batch / resume / parallel)
+main.py  (v8 — batch / resume / parallel)
 Based on run_wabel_canny.py v7 (Wabel_binarization_cmap_generation):
   Wabel local thresholding → binarize each frame → per-position c̄ averaging
   → ray-scan c̄ contours → zero-fill pos0 + linear extension to nozzle lip
@@ -1580,7 +1580,7 @@ def finalize_instant(flame, F, positions, t):
 def build_settings_log(flame, dirs, positions, mans):
     L = [f"USER SETTINGS LOG — {flame}",
          f"generated {datetime.datetime.now().isoformat(timespec='seconds')} "
-         f"by run_wabel_batch.py {SCRIPT_VERSION}", "",
+         f"by main.py {SCRIPT_VERSION}", "",
          "=== Flame-level analysis settings (applied in this run) ==="]
     L += [f"{k} = {v!r}" for k, v in current_settings(ANALYSIS_KEYS).items()]
     L += ["", "=== Per-position processing settings ==="]
@@ -1897,8 +1897,8 @@ def main():
     log_path = os.path.join(ld, f"run_{stamp}.log")
     sys.stdout = _Tee(log_path)
 
-    log(f"run_wabel_batch.py {SCRIPT_VERSION} — started {stamp}")
-    log(f"config     = {_CONFIG_LOCAL or 'defaults in run_wabel_batch.py (no config_local.py)'}")
+    log(f"main.py {SCRIPT_VERSION} — started {stamp}")
+    log(f"config     = {_CONFIG_LOCAL or 'defaults in main.py (no config_local.py)'}")
     log(f"INPUT_DIR  = {INPUT_DIR}\nOUTDIR     = {OUTDIR}\nlog file   = {log_path}")
     log(f"DO_CBAR={DO_CBAR}  DO_INSTANT={DO_INSTANT}  NUM_WORKERS={NUM_WORKERS}  "
         f"CHUNK_FRAMES={CHUNK_FRAMES}  N_INSTANT={N_INSTANT}")
