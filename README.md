@@ -45,7 +45,7 @@ the window about 0.04 s). Output goes to `OUTDIR/binarisation_comparison/thresho
 `comparison_all_flames.xlsx`, and per flame `<flame>_comparison.xlsx`
 (A and h of both methods per c̄ level, differences, mean contour distance),
 `clines_window_vs_watershed.png`, `cbar_difference.png` and sample frames per
-position. The results of `run_wabel_batch.py` are not touched. Resumable like the main script.
+position. The results of `main.py` are not touched. Resumable like the main script.
 
 ## Input naming
 `<flame name>_pos<N> <anything>.spe` for data, `<flame name>_pos<N>_bg <anything>.spe`

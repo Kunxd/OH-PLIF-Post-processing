@@ -51,5 +51,5 @@ COMPARE_MAX_FRAMES = 200    # frames per position (None = all; watershed ≈ 1�
 # COMPARE_N_SAMPLES    = 3      # sample frames per position saved as pictures
 # WATERSHED_PRE_MEDIAN = 3      # median filter [px] on the ridge-finding image (0 = off)
 # WATERSHED_CONNECTIVITY = 1    # 1 = 4-neighbourhood, 2 = 8-neighbourhood
-# WATERSHED_N_ITER     = None   # passes; None = N_ITER of run_wabel_batch.py
+# WATERSHED_N_ITER     = None   # passes; None = N_ITER of main.py
 # COMPARE_OUTDIR       = None   # None → OUTDIR/binarisation_comparison/threshold_XX

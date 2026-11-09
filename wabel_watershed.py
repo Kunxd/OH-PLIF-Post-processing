@@ -18,7 +18,7 @@ Algorithm (thesis wording, paraphrased)
      is below `frac` times that value, it is set to zero.
   3. Steps 1-2 are repeated on the thresholded image (ridges are recomputed).
 
-Difference to the moving-window version in run_wabel_batch.py
+Difference to the moving-window version in main.py
   wabel_local_threshold(img, ws, frac, n) compares each pixel with the maximum
   inside a fixed ws x ws square. Here the reference is the crest of the
   nearest bright structure, whatever its distance, and it is recomputed in
@@ -36,7 +36,7 @@ Choices not specified by Wabel (state them in the thesis if this is used)
   * ridges on pixels that are already zero are ignored; if no ridge is left,
     the frame maximum is used as the reference.
 
-Used by compare_binarisation.py.  Drop-in for run_wabel_batch.binary_u8:
+Used by compare_binarisation.py.  Drop-in for main.binary_u8:
     bi = wabel_watershed_threshold(work.clip(0, 255).astype(np.uint8),
                                    frac, N_ITER)
 instead of

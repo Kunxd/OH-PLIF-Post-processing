@@ -3,18 +3,18 @@
 compare_binarisation.py — moving-window threshold vs. Wabel's watershed threshold
 on real flames.
 
-Both methods run through exactly the same chain as run_wabel_batch.py:
+Both methods run through exactly the same chain as main.py:
   bg subtraction → crop → to_uint8 → NOISE_FLOOR → LOCAL THRESHOLD
   → close / open / blur clean-up → c̄ per position → stacked composite
   → ray-scanned c-lines → A (revolution) and h
 Only the local threshold differs:
   window     maximum over a WINDOW_SIZE × WINDOW_SIZE square
-             (run_wabel_batch.wabel_local_threshold, the current pipeline)
+             (main.wabel_local_threshold, the current pipeline)
   watershed  signal at the nearest ridge of a watershed segmentation, ridges
              recomputed in every pass (wabel_watershed.py; Wabel's PhD thesis
              2017, Sec. 2.4.1.4, p. 57)
 
-Settings come from config_local.py — the same file as run_wabel_batch.py
+Settings come from config_local.py — the same file as main.py
 (INPUT_DIR, OUTDIR, crops, NOZZLE_CENTER, THRESHOLD_FRAC, NUM_WORKERS, ...).
 Extra keys that can be set there (all optional):
   COMPARE_FLAMES        []   names (or parts of names) of the flames to compare;
@@ -29,7 +29,7 @@ Extra keys that can be set there (all optional):
   WATERSHED_N_ITER      None passes (None = N_ITER of the main script)
   COMPARE_OUTDIR        None output folder (None = OUTDIR/binarisation_comparison/threshold_XX)
 
-Output (the results of run_wabel_batch.py are not touched):
+Output (the results of main.py are not touched):
   COMPARE_OUTDIR/
   ├── comparison_all_flames.xlsx     A, h, contour distance per flame and c̄ level
   ├── <flame>/
@@ -60,7 +60,7 @@ from matplotlib.lines import Line2D
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import run_wabel_batch as rwb        # loads config_local.py and all pipeline functions
+import main as rwb                    # loads config_local.py and all pipeline functions
 from wabel_watershed import wabel_watershed_threshold
 
 SCRIPT_VERSION = "1.0"
@@ -89,7 +89,7 @@ log, warn, WARNINGS = rwb.log, rwb.warn, rwb.WARNINGS
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Binarisation — identical to run_wabel_batch.binary_u8 except the threshold
+#  Binarisation — identical to main.binary_u8 except the threshold
 # ══════════════════════════════════════════════════════════════════════
 def _cleanup(bi):
     u8 = bi.astype(np.uint8) * 255
@@ -234,7 +234,7 @@ def process_position(job):
                     differ.append(float((bins["window"] != bins["watershed"]).mean()))
                     if not checked:          # same maths as the main script?
                         if not np.array_equal(rwb.binary_u8(img, THR) > 0, bins["window"]):
-                            W.append("window binary differs from run_wabel_batch.binary_u8 "
+                            W.append("window binary differs from main.binary_u8 "
                                      "— settings not identical?")
                         checked = True
                     if sample:
