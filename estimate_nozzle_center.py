@@ -5,7 +5,7 @@ finished flame from its saved c̄ maps.  No raw .spe data needed.
 
 Method
   1. Stack the flame's pos*/cbar.npy files (pos1 at the bottom), exactly like
-     the composite in run_wabel_batch.py.
+     the composite in main.py.
   2. Ray-scan the c̄ = LEVEL line from a start centre (NOZZLE_CENTER).
   3. In every row where both the left and the right arm were found, take the
      midpoint between them.  The top part of the line (near the tip, where the
@@ -29,7 +29,7 @@ import os, sys, re, glob, csv, math
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import run_wabel_batch as W          # same scan function + your config_local.py settings
+import main as W                     # same scan function + your config_local.py settings
 
 LEVEL          = 0.5    # c̄ line used for the midpoint
 IGNORE_TOP     = 0.25   # ignore this fraction of the line length near the tip

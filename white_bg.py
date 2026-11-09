@@ -134,7 +134,7 @@ def validate_visually(binary_image, core_mask, processed_image):
 # =====================================================================
 # ADDED (Axel's repo, not in the original): input/output folders only.
 # Nothing above or below this block is changed.  This block only
-#   - reads OUTDIR from config_local.py (same settings file as run_wabel_batch.py)
+#   - reads OUTDIR from config_local.py (same settings file as main.py)
 #   - saves every figure that validate_visually() shows into OUTDIR/white_bg/
 #     (if that folder already exists: white_bg_2, white_bg_3, ... nothing is overwritten)
 #   - writes run_info.txt into that folder: GitHub commit of this script, local

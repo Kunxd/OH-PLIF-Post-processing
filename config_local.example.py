@@ -1,6 +1,6 @@
 # Copy this file to config_local.py and edit it.  config_local.py is
 # ignored by git, so your paths survive every `git pull`.
-# Any setting from the CONFIG block of run_wabel_batch.py can be overridden here.
+# Any setting from the CONFIG block of main.py can be overridden here.
 
 INPUT_DIR   = "/media/USERNAME/EXTERNAL_DRIVE/scaling_spe/OHLIF"   # searched recursively
 OUTDIR      = "/home/USERNAME/Wabel_results"   # internal disk recommended
