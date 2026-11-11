@@ -14,6 +14,7 @@ surface area by revolution and flame height. S_T = ṁ / (ρ_u · A).
 | `estimate_nozzle_center.py` | estimates each flame's nozzle centre from the saved c̄ maps |
 | `white_bg.py` | supervisor's core-isolation script, unchanged; only an added block that reads `OUTDIR` from `config_local.py` and saves figures to `OUTDIR/white_bg/`. `python3 white_bg.py` = original synthetic test, `--real` = binarized frames under `OUTDIR` |
 | `compare_binarisation.py` | runs the moving-window threshold (pipeline) and Wabel's watershed threshold (`wabel_watershed.py`) side by side on the same frames, through the same chain; compares c̄, c-lines, A and h. Writes only to its own folder |
+| `wabel_new.py` | the full `main.py` pipeline with Wabel's watershed threshold instead of the moving window; everything else identical. Same `config_local.py`; results go to `OUTDIR_wabel_new/` (next to OUTDIR, never mixed) |
 | `wabel_watershed.py` | Wabel's PhD-thesis local threshold: each pixel vs. the signal at the nearest watershed ridge (needs scikit-image) |
 | `config_local.example.py` | template for your machine-specific settings |
 
@@ -32,6 +33,21 @@ python3 main.py
 ```
 Set `DRY_RUN = True` in `config_local.py` first to check which flames and
 positions are found. An interrupted run is resumed by simply starting it again.
+
+### Full pipeline with Wabel's watershed threshold (optional)
+```bash
+pip3 install scikit-image
+python3 wabel_new.py
+```
+Does exactly what `main.py` does, but binarises each frame with the
+nearest-ridge (watershed) threshold from Wabel's PhD thesis instead of the
+moving window. It does not copy `main.py`: it loads it and swaps only the
+threshold function, so later fixes in `main.py` apply to both. Reads the same
+`config_local.py`; `WINDOW_SIZE` is ignored. Output: `OUTDIR_wabel_new/`
+(override with `WABEL_NEW_OUTDIR`), same layout as `main.py`'s. About 0.3–0.6 s
+per frame on real data (main.py: 0.03 s). Resumable like the main script.
+To run `estimate_nozzle_center.py` or `white_bg.py` on these results, pass the
+folder: `python3 white_bg.py /path/to/OUTDIR_wabel_new`.
 
 ### Binarisation comparison (optional)
 ```bash

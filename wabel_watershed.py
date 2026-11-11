@@ -36,7 +36,7 @@ Choices not specified by Wabel (state them in the thesis if this is used)
   * ridges on pixels that are already zero are ignored; if no ridge is left,
     the frame maximum is used as the reference.
 
-Used by compare_binarisation.py.  Drop-in for main.binary_u8:
+Used by compare_binarisation.py and wabel_new.py.  Drop-in for main.binary_u8:
     bi = wabel_watershed_threshold(work.clip(0, 255).astype(np.uint8),
                                    frac, N_ITER)
 instead of
