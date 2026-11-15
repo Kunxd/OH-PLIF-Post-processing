@@ -7,16 +7,17 @@ Wabel local thresholding → per-position c̄ → ray-scanned c̄ contours →
 surface area by revolution and flame height. S_T = ṁ / (ρ_u · A).
 
 ## Files
+Two versions of the analysis. They are identical except for how each frame is
+binarised, read the same `config_local.py` and write to separate folders.
+
 | file | purpose |
 |---|---|
-| `main.py` | main batch script (v8): all flames, parallel, resumable. Called `run_wabel_batch.py` up to Nov 2026; same code, only renamed |
+| `ohplif1.py` | **Version 1 — moving window.** Each pixel vs. the maximum in a `WINDOW_SIZE` × `WINDOW_SIZE` square. The full batch script (v8): all flames, parallel, resumable. Results in `OUTDIR`. Called `run_wabel_batch.py`, then `main.py`, until Nov 2026; same code, only renamed |
+| `ohplif2.py` | **Version 2 — watershed.** Each pixel vs. the signal at the nearest watershed ridge (Wabel's PhD thesis 2017, Sec. 2.4.1.4, p. 57; 25 %, 4 passes as in Wabel et al. PCI 2017, p. 1803). Does not copy `ohplif1.py`: it loads it and swaps only the threshold, so every fix in `ohplif1.py` applies to both. Results in `OUTDIR_ohplif2`. Needs scikit-image. Was `wabel_new.py` + `wabel_watershed.py` |
 | `spe_reader.py` | LightField / WinSpec `.spe` reader |
 | `estimate_nozzle_center.py` | estimates each flame's nozzle centre from the saved c̄ maps |
-| `centre_overview.py` | overview of the measured flame axis of all flames (near-nozzle = the composites' synthetic axis, whole-flame, per position, tilt) from the saved `c_lines.npz`; nothing reprocessed. `python3 centre_overview.py OUTDIR` → `OUTDIR/centre_overview/` (Excel, overview figures, per-flame check images) |
+| `centre_overview.py` | overview of the measured flame axis of all flames (near-nozzle = the composites' synthetic axis, whole-flame, per position, tilt) from the saved `c_lines.npz`; nothing reprocessed. `python3 centre_overview.py OUTDIR` → `OUTDIR/centre_overview/` (Excel, overview figures, per-flame check images). Works on the results of both versions |
 | `white_bg.py` | supervisor's core-isolation script, unchanged; only an added block that reads `OUTDIR` from `config_local.py` and saves figures to `OUTDIR/white_bg/`. `python3 white_bg.py` = original synthetic test, `--real` = binarized frames under `OUTDIR` |
-| `compare_binarisation.py` | runs the moving-window threshold (pipeline) and Wabel's watershed threshold (`wabel_watershed.py`) side by side on the same frames, through the same chain; compares c̄, c-lines, A and h. Writes only to its own folder |
-| `wabel_new.py` | the full `main.py` pipeline with Wabel's watershed threshold instead of the moving window; everything else identical. Same `config_local.py`; results go to `OUTDIR_wabel_new/` (next to OUTDIR, never mixed) |
-| `wabel_watershed.py` | Wabel's PhD-thesis local threshold: each pixel vs. the signal at the nearest watershed ridge (needs scikit-image) |
 | `config_local.example.py` | template for your machine-specific settings |
 
 ## Setup (once per computer)
@@ -30,39 +31,19 @@ cp config_local.example.py config_local.py   # then edit paths in config_local.p
 ## Run
 ```bash
 git pull                     # get the latest version
-python3 main.py
+python3 ohplif1.py           # version 1 (moving window)  → OUTDIR
+python3 ohplif2.py           # version 2 (watershed)      → OUTDIR_ohplif2
 ```
 Set `DRY_RUN = True` in `config_local.py` first to check which flames and
 positions are found. An interrupted run is resumed by simply starting it again.
 
-### Full pipeline with Wabel's watershed threshold (optional)
-```bash
-pip3 install scikit-image
-python3 wabel_new.py
-```
-Does exactly what `main.py` does, but binarises each frame with the
-nearest-ridge (watershed) threshold from Wabel's PhD thesis instead of the
-moving window. It does not copy `main.py`: it loads it and swaps only the
-threshold function, so later fixes in `main.py` apply to both. Reads the same
-`config_local.py`; `WINDOW_SIZE` is ignored. Output: `OUTDIR_wabel_new/`
-(override with `WABEL_NEW_OUTDIR`), same layout as `main.py`'s. About 0.3–0.6 s
-per frame on real data (main.py: 0.03 s). Resumable like the main script.
-To run `estimate_nozzle_center.py` or `white_bg.py` on these results, pass the
-folder: `python3 white_bg.py /path/to/OUTDIR_wabel_new`.
-
-### Binarisation comparison (optional)
-```bash
-pip3 install scikit-image
-python3 compare_binarisation.py
-```
-Reads the same `config_local.py`. Choose the flames with `COMPARE_FLAMES`
-(default: first flame only) and the frames per position with
-`COMPARE_MAX_FRAMES` (default 200; the watershed needs about 1–2 s per frame,
-the window about 0.04 s). Output goes to `OUTDIR/binarisation_comparison/threshold_XX/`:
-`comparison_all_flames.xlsx`, and per flame `<flame>_comparison.xlsx`
-(A and h of both methods per c̄ level, differences, mean contour distance),
-`clines_window_vs_watershed.png`, `cbar_difference.png` and sample frames per
-position. The results of `main.py` are not touched. Resumable like the main script.
+`ohplif2.py` ignores `WINDOW_SIZE`; its own optional settings
+(`WATERSHED_PRE_MEDIAN`, `WATERSHED_CONNECTIVITY`, `WATERSHED_N_ITER`,
+`OHPLIF2_OUTDIR`) are listed in `config_local.example.py`. It takes about
+0.3–0.6 s per frame on real data (`ohplif1.py`: 0.03 s). Results of the earlier
+`wabel_new.py` in `OUTDIR_wabel_new` are reused (not redone) as long as no
+`OUTDIR_ohplif2` folder exists. To run the helper scripts on version-2 results,
+pass the folder, e.g. `python3 centre_overview.py /path/to/OUTDIR_ohplif2`.
 
 ## Input naming
 `<flame name>_pos<N> <anything>.spe` for data, `<flame name>_pos<N>_bg <anything>.spe`
@@ -96,4 +77,4 @@ automatically on the next run (nothing is reprocessed; the old flame Excel is
 kept as `_run_data/<flame>/old_<flame>_results.xlsx`).
 With `INSTANT_AREA = True`, the inner flame front of each stitched composite (outer product/air edge removed, pockets kept) is revolved 180° per side like the c-lines → `A_inst`.
 
-Run logs in `OUTDIR/logs/`. `estimate_nozzle_center.py` reads `OUTDIR/threshold_XX/` (first threshold, or give one: `python3 estimate_nozzle_center.py OUTDIR 0.30`).
+Run logs in `OUTDIR/logs/`, the code and `config_local.py` of each run in `OUTDIR/code_used/`. `estimate_nozzle_center.py` reads `OUTDIR/threshold_XX/` (first threshold, or give one: `python3 estimate_nozzle_center.py OUTDIR 0.30`).

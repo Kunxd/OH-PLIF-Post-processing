@@ -1,6 +1,7 @@
 # Copy this file to config_local.py and edit it.  config_local.py is
 # ignored by git, so your paths survive every `git pull`.
-# Any setting from the CONFIG block of main.py can be overridden here.
+# Any setting from the CONFIG block of ohplif1.py can be overridden here
+# (ohplif2.py reads the same file).
 
 INPUT_DIR   = "/media/USERNAME/EXTERNAL_DRIVE/scaling_spe/OHLIF"   # searched recursively
 OUTDIR      = "/home/USERNAME/Wabel_results"   # internal disk recommended
@@ -43,16 +44,9 @@ DEBUG_SYNTH_AXIS_ROWS = 5      # and a second pos0 c-line bridged to it (picture
 # Other overrides, e.g.:
 # REBUILD_FINISHED_FLAMES = True
 
-# ── wabel_new.py and compare_binarisation.py (Wabel's watershed threshold) ─
-# Both use all settings above. The keys below are only read by these scripts.
+# ── ohplif2.py only (Wabel's watershed threshold) ───────────────────────
+# ohplif2.py uses all settings above. The keys below are only read by ohplif2.py.
 # WATERSHED_PRE_MEDIAN = 3      # median filter [px] on the ridge-finding image (0 = off)
 # WATERSHED_CONNECTIVITY = 1    # 1 = 4-neighbourhood, 2 = 8-neighbourhood
-# WATERSHED_N_ITER     = None   # passes; None = N_ITER of main.py
-# WABEL_NEW_OUTDIR     = None   # wabel_new.py output; None → OUTDIR + "_wabel_new"
-
-# compare_binarisation.py only:
-COMPARE_FLAMES     = []     # e.g. ["CH4_Re15000_phi1"]; [] → ONLY/EXCLUDE/MAX_FLAMES, else first flame
-COMPARE_MAX_FRAMES = 200    # frames per position (None = all; watershed ≈ 1–2 s per frame)
-# COMPARE_THRESHOLD    = 0.25   # default: first value of THRESHOLD_FRAC
-# COMPARE_N_SAMPLES    = 3      # sample frames per position saved as pictures
-# COMPARE_OUTDIR       = None   # None → OUTDIR/binarisation_comparison/threshold_XX
+# WATERSHED_N_ITER     = None   # passes; None = N_ITER of ohplif1.py
+# OHPLIF2_OUTDIR       = None   # ohplif2.py output; None → OUTDIR + "_ohplif2"

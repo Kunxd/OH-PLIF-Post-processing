@@ -2,7 +2,7 @@
 """
 centre_overview.py — where is the flame axis really?
 
-Reads a results folder of main.py (or wabel_new.py) and gives an overview of the
+Reads a results folder of ohplif1.py or ohplif2.py and gives an overview of the
 measured flame centre of every flame, compared with the configured NOZZLE_CENTER.
 Nothing is reprocessed, no .spe files are needed and no result file is changed.
 
@@ -18,7 +18,7 @@ threshold_25/ folder, one flame folder).  Every
 v8.4 and older).  Output goes to RESULTS_DIR/centre_overview/ unless --out is given.
 
 What is measured
-  main.py finds each c-line with a ray scan: in every row it starts at
+  ohplif1/2 find each c-line with a ray scan: in every row it starts at
   NOZZLE_CENTER and walks left and right until c̄ reaches the level.  In a row
   where both the left and the right point exist, their midpoint
   (x_left + x_right) / 2 is where the flame axis is in that row.  The scan stops
@@ -27,7 +27,7 @@ What is measured
   depend on the configured value.
 
   near-nozzle centre   mean midpoint over the lowest --rows rows of pos1.
-                       Same rows and formula as the "synthetic axis" main.py draws
+                       Same rows and formula as the "synthetic axis" ohplif1/2 draw
                        with DEBUG_SYNTH_AXIS = True (DEBUG_SYNTH_AXIS_ROWS = 5).
   whole-flame centre   median midpoint over the flame, without the top 25 % of the
                        line near the tip and rows where the arms are < 20 px apart
@@ -61,22 +61,22 @@ import numpy as np
 
 # ── defaults (all can be changed on the command line) ────────────────────
 REF_LEVEL        = 0.5    # c̄ level shown in the overview figures / Overview sheet
-NEAR_NOZZLE_ROWS = 5      # = DEBUG_SYNTH_AXIS_ROWS in main.py
+NEAR_NOZZLE_ROWS = 5      # = DEBUG_SYNTH_AXIS_ROWS in ohplif1.py
 IGNORE_TOP       = 0.25   # = estimate_nozzle_center.py
 MIN_WIDTH_PX     = 20     # = estimate_nozzle_center.py
 WARN_SHIFT_PX    = 5      # flag: near-nozzle centre further than this from NOZZLE_CENTER
 SMOOTH_ROWS      = 21     # running median along the height for the profile lines (plot only)
 
-AVG_DIR  = "average composites"            # main.py AVG_DIR_NAME
+AVG_DIR  = "average composites"            # ohplif1.py AVG_DIR_NAME
 OUT_NAME = "centre_overview"
 SKIP_DIRS = {"_run_data", "code_used", "logs", "white_bg", OUT_NAME}
 
-# main.py colours, so a c̄ level has the same hue in every figure:
+# ohplif1.py colours, so a c̄ level has the same hue in every figure:
 LEVEL_COLORS  = ['black', 'limegreen', 'dodgerblue', 'orange', 'magenta',
                  'cyan', 'red', 'yellow']                 # c-lines on the c̄ map
 MARKER_COLORS = ['dimgray', 'forestgreen', 'royalblue', 'darkorange', 'darkmagenta',
                  'darkcyan', 'darkred', 'gold']           # same hues, darker: on white
-AXIS_COLOR = 'goldenrod'                                  # NOZZLE_CENTER line, as in main.py
+AXIS_COLOR = 'goldenrod'                                  # NOZZLE_CENTER line, as in ohplif1.py
 INK, INK2, GRID = '#0b0b0b', '#52514e', '#e4e3df'
 
 
@@ -159,7 +159,7 @@ def row_position(F, ys):
 
 
 def height_mm(F, ys):
-    """Same height definition as the c-lines in main.py (mm above the nozzle exit)."""
+    """Same height definition as the c-lines in ohplif1.py (mm above the nozzle exit)."""
     H = F["h_real"] + F["ext_px"]
     return (H - 1 - np.asarray(ys, float)) * F["res"] + F["height_offset"]
 
@@ -180,7 +180,7 @@ def measure_level(F, left, right, n_rows):
     z = height_mm(F, ys)
     pos = row_position(F, ys)
 
-    # near nozzle — identical to main.synthetic_axis_column()
+    # near nozzle — identical to ohplif1.synthetic_axis_column()
     first_row = max(F["h_real"] - n_rows, max(F["offsets"]))
     near_mask = ys >= first_row
     if near_mask.any():
@@ -602,7 +602,7 @@ def default_root():
 def main():
     global NEAR_NOZZLE_ROWS
     ap = argparse.ArgumentParser(description="Overview of the measured flame centres in a "
-                                             "main.py results folder.")
+                                             "ohplif1.py / ohplif2.py results folder.")
     ap.add_argument("results_dir", nargs="?", help="OUTDIR of the analysis (default: OUTDIR "
                                                    "from config_local.py)")
     ap.add_argument("--level", type=float, default=REF_LEVEL,
@@ -627,7 +627,7 @@ def main():
     print(f"Results folder : {root}")
     print(f"c_lines.npz    : {len(paths)} found")
     if not paths:
-        sys.exit(f"No '{AVG_DIR}/c_lines.npz' below {root}. Run main.py with DO_CBAR = True first.")
+        sys.exit(f"No '{AVG_DIR}/c_lines.npz' below {root}. Run ohplif1.py or ohplif2.py with DO_CBAR = True first.")
 
     seen = {}
     for p in paths:

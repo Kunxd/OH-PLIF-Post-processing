@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-main.py  (v8 — batch / resume / parallel)
+ohplif1.py  (v8 — batch / resume / parallel) — VERSION 1: moving-window binarisation
+  (each pixel vs. the maximum in a WINDOW_SIZE × WINDOW_SIZE square).
+  Version 2, ohplif2.py, runs this same file with Wabel's watershed threshold instead.
+  Called run_wabel_batch.py up to early Nov 2026 and main.py until 15 Nov 2026.
 Based on run_wabel_canny.py v7 (Wabel_binarization_cmap_generation):
   Wabel local thresholding → binarize each frame → per-position c̄ averaging
   → ray-scan c̄ contours → zero-fill pos0 + linear extension to nozzle lip
@@ -140,6 +143,7 @@ except ImportError:
     _CONFIG_LOCAL = None
 
 SCRIPT_VERSION = "v8.6"
+SCRIPT_NAME = "ohplif1.py"           # ohplif2.py sets "ohplif2.py"
 
 # Settings baked into per-position products (logged, never auto-invalidated)
 PROCESSING_KEYS = ["SPATIAL_RES", "CROP_BOTTOM_MM", "CROP_TOP_MM", "NOISE_FLOOR",
@@ -1580,7 +1584,7 @@ def finalize_instant(flame, F, positions, t):
 def build_settings_log(flame, dirs, positions, mans):
     L = [f"USER SETTINGS LOG — {flame}",
          f"generated {datetime.datetime.now().isoformat(timespec='seconds')} "
-         f"by main.py {SCRIPT_VERSION}", "",
+         f"by {SCRIPT_NAME} {SCRIPT_VERSION}", "",
          "=== Flame-level analysis settings (applied in this run) ==="]
     L += [f"{k} = {v!r}" for k, v in current_settings(ANALYSIS_KEYS).items()]
     L += ["", "=== Per-position processing settings ==="]
@@ -1897,8 +1901,8 @@ def main():
     log_path = os.path.join(ld, f"run_{stamp}.log")
     sys.stdout = _Tee(log_path)
 
-    log(f"main.py {SCRIPT_VERSION} — started {stamp}")
-    log(f"config     = {_CONFIG_LOCAL or 'defaults in main.py (no config_local.py)'}")
+    log(f"{SCRIPT_NAME} {SCRIPT_VERSION} — started {stamp}")
+    log(f"config     = {_CONFIG_LOCAL or f'defaults in {SCRIPT_NAME} (no config_local.py)'}")
     log(f"INPUT_DIR  = {INPUT_DIR}\nOUTDIR     = {OUTDIR}\nlog file   = {log_path}")
     log(f"DO_CBAR={DO_CBAR}  DO_INSTANT={DO_INSTANT}  NUM_WORKERS={NUM_WORKERS}  "
         f"CHUNK_FRAMES={CHUNK_FRAMES}  N_INSTANT={N_INSTANT}")
