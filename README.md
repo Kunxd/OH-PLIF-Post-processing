@@ -12,6 +12,7 @@ surface area by revolution and flame height. S_T = ṁ / (ρ_u · A).
 | `main.py` | main batch script (v8): all flames, parallel, resumable. Called `run_wabel_batch.py` up to Nov 2026; same code, only renamed |
 | `spe_reader.py` | LightField / WinSpec `.spe` reader |
 | `estimate_nozzle_center.py` | estimates each flame's nozzle centre from the saved c̄ maps |
+| `centre_overview.py` | overview of the measured flame axis of all flames (near-nozzle = the composites' synthetic axis, whole-flame, per position, tilt) from the saved `c_lines.npz`; nothing reprocessed. `python3 centre_overview.py OUTDIR` → `OUTDIR/centre_overview/` (Excel, overview figures, per-flame check images) |
 | `white_bg.py` | supervisor's core-isolation script, unchanged; only an added block that reads `OUTDIR` from `config_local.py` and saves figures to `OUTDIR/white_bg/`. `python3 white_bg.py` = original synthetic test, `--real` = binarized frames under `OUTDIR` |
 | `compare_binarisation.py` | runs the moving-window threshold (pipeline) and Wabel's watershed threshold (`wabel_watershed.py`) side by side on the same frames, through the same chain; compares c̄, c-lines, A and h. Writes only to its own folder |
 | `wabel_new.py` | the full `main.py` pipeline with Wabel's watershed threshold instead of the moving window; everything else identical. Same `config_local.py`; results go to `OUTDIR_wabel_new/` (next to OUTDIR, never mixed) |
