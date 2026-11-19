@@ -75,6 +75,7 @@ later only processes the new threshold; existing ones are reused.
 Results from v8.4 and older (`OUTDIR/<flame>/…`) are moved into this layout
 automatically on the next run (nothing is reprocessed; the old flame Excel is
 kept as `_run_data/<flame>/old_<flame>_results.xlsx`).
+Instantaneous composites (visualisation only — positions were not recorded simultaneously): per position, frames are matched on their binary images (`STITCH_BAND_PX` rows at each junction, best chain over all positions); the matched binaries are stitched, and the front is traced once on the stitched binary (since v8.7). The front is therefore continuous across junctions, and a mismatch between positions shows as a short horizontal step (its size is printed at each junction).
 With `INSTANT_AREA = True`, the inner flame front of each stitched composite (outer product/air edge removed, pockets kept) is revolved 180° per side like the c-lines → `A_inst`.
 
 Run logs in `OUTDIR/logs/`, the code and `config_local.py` of each run in `OUTDIR/code_used/`. `estimate_nozzle_center.py` reads `OUTDIR/threshold_XX/` (first threshold, or give one: `python3 estimate_nozzle_center.py OUTDIR 0.30`).

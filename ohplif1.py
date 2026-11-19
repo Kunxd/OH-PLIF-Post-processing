@@ -23,6 +23,10 @@ New in v8
 v8.4  THRESHOLD_FRAC may be a list (sensitivity analysis), Excel grouped per threshold
 v8.5  Output folders threshold → flame: OUTDIR/threshold_25/<flame>/…,
       shared bookkeeping in OUTDIR/_run_data/<flame>/; old layout migrated automatically
+v8.7  Instantaneous composites: frames matched on their binaries → binaries stitched →
+      front traced ONCE on the stitched binary (was: traced per frame, then stacked).
+      The front is now continuous across position junctions; a mismatch shows as a
+      short horizontal step. Finished flames re-finalise once (no frame reprocessing).
 
 Requires spe_reader.py in the same folder.  Python ≥ 3.8.
 """
@@ -142,7 +146,7 @@ try:
 except ImportError:
     _CONFIG_LOCAL = None
 
-SCRIPT_VERSION = "v8.6"
+SCRIPT_VERSION = "v8.7"
 SCRIPT_NAME = "ohplif1.py"           # ohplif2.py sets "ohplif2.py"
 
 # Settings baked into per-position products (logged, never auto-invalidated)
@@ -1348,6 +1352,27 @@ WHITE_RED = LinearSegmentedColormap.from_list(
     "white_red", ["#ffffff", "#ffb3b3", "#ff4d4d", "#ff0000", "#dd0000"])
 
 
+def binary_front(BI, min_px=None):
+    """1-px front of a (stitched) binary image: burnt pixels with at least one
+    unburnt 4-neighbour.  The image border does not count as unburnt, so no
+    lines are drawn along it.  Traced AFTER stitching, a burnt/unburnt step at
+    a position junction shows up as a short horizontal piece of front instead
+    of a gap.  Front pieces with fewer than min_px pixels are dropped (as
+    MIN_CONTOUR_PX does for the per-frame fronts)."""
+    if min_px is None:
+        min_px = MIN_CONTOUR_PX
+    B = BI.astype(np.uint8)
+    cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    er = cv2.erode(B, cross, borderType=cv2.BORDER_REPLICATE)
+    F = (B > 0) & (er == 0)
+    if min_px and min_px > 1:
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(F.astype(np.uint8), connectivity=8)
+        big = stats[:, cv2.CC_STAT_AREA] >= min_px
+        big[0] = False
+        F = big[lab]
+    return F
+
+
 def inner_front(FR, BI, nc):
     """Keep only the reactant/product front: front pixels bordering the
     unburnt core or enclosed pockets.  Front pixels bordering unburnt
@@ -1435,13 +1460,16 @@ def _best_chain(costs, avail):
 
 def finalize_instant(flame, F, positions, t):
     pre = f"[thr {thr_pct(t)}%] " if len(thresholds()) > 1 else ""
+    # Only the binary images are used: frames are matched on them, stitched, and
+    # the front is traced once on the stitched binary (v8.7).  The per-frame
+    # fronts stored in instant_fronts.npz are not needed here any more.
     data = {}
     for p in positions:
         z = np.load(inst_file(flame, p, t))
-        data[p] = (z["fronts"], z["binaries"], z["frame_index"])
-    widths = {p: d[0].shape[2] for p, d in data.items()}
+        data[p] = (None, z["binaries"], z["frame_index"])
+    widths = {p: d[1].shape[2] for p, d in data.items()}
     if len(set(widths.values())) > 1:
-        raise ValueError(f"instantaneous fronts have different widths {widths}")
+        raise ValueError(f"instantaneous binaries have different widths {widths}")
     ps = sorted(positions)                       # bottom → top
     # cost[k][a, b]: mismatch (px) between top edge of ps[k] frame a and
     # bottom edge of ps[k+1] frame b
@@ -1450,7 +1478,7 @@ def finalize_instant(flame, F, positions, t):
         L = _edge_masks(data[ps[k]][1], top=True).astype(np.float32)
         U = _edge_masks(data[ps[k + 1]][1], top=False).astype(np.float32)
         costs.append(L.sum(1)[:, None] + U.sum(1)[None, :] - 2.0 * (L @ U.T))
-    avail = [np.ones(data[p][0].shape[0], dtype=bool) for p in ps]
+    avail = [np.ones(data[p][1].shape[0], dtype=bool) for p in ps]
 
     idir = os.path.join(flame_dir(flame, t), INST_DIR_NAME); os.makedirs(idir, exist_ok=True)
     bdir = os.path.join(flame_dir(flame, t), INST_BIN_DIR_NAME); os.makedirs(bdir, exist_ok=True)
@@ -1471,25 +1499,25 @@ def finalize_instant(flame, F, positions, t):
             avail[k][a] = False
         jc = [float(costs[k][chain[k], chain[k + 1]]) for k in range(len(costs))]
 
-        fr_strips, bi_strips, raw_strips, srcs, bounds, y = [], [], [], {}, [], 0
+        bi_strips, raw_strips, srcs, bounds, y = [], [], {}, [], 0
         for k in range(len(ps) - 1, -1, -1):        # top position first
             p = ps[k]
-            fr = data[p][0][chain[k]].copy()
-            # findContours traces regions touching the image border along the
-            # border itself — not a flame front.  Remove border pixels so they
-            # don't show up as horizontal lines at every position junction.
-            fr[0, :] = False; fr[-1, :] = False; fr[:, 0] = False; fr[:, -1] = False
-            fr_strips.append(fr); bi_strips.append(data[p][1][chain[k]])
+            bi = data[p][1][chain[k]]
+            bi_strips.append(bi)
             g = int(data[p][2][chain[k]])
             raw, fname, fidx = read_raw_instant_frame(F["positions"][p], g, bgs[p], p)
-            if raw.shape != fr.shape:
-                raise ValueError(f"pos{p}: raw frame shape {raw.shape} ≠ stored front "
-                                 f"shape {fr.shape}")
+            if raw.shape != bi.shape:
+                raise ValueError(f"pos{p}: raw frame shape {raw.shape} ≠ stored binary "
+                                 f"shape {bi.shape}")
             raw_strips.append(raw)
             srcs[f"pos{p}"] = {"file": fname, "frame_in_file": fidx}
             bounds.append((y, p, g))
-            y += data[p][0].shape[1]
-        FR = np.vstack(fr_strips); BI = np.vstack(bi_strips); RAW = np.vstack(raw_strips)
+            y += bi.shape[0]
+        BI = np.vstack(bi_strips); RAW = np.vstack(raw_strips)
+        # 1) frames matched (above)  2) binaries stitched  3) front traced once
+        # on the stitched binary → continuous across junctions; a mismatch at a
+        # junction appears as a short horizontal step in the front.
+        FR = binary_front(BI)
         for d_ in (idir, bdir):
             atomic_save_npy(os.path.join(d_, f"instant_front_composite_{ci}.npy"), FR)
         atomic_save_npy(os.path.join(bdir, f"instant_binary_composite_{ci}.npy"), BI)
@@ -1501,22 +1529,24 @@ def finalize_instant(flame, F, positions, t):
                                          for k in range(len(jc))},
                 "note": "Positions were recorded at different times: this is a "
                         "SYNTHETIC stitched front for visualisation only.",
+                "front": "traced once on the stitched binary image, after matching",
                 "rows_top_to_bottom": [{"row_offset": b[0], "pos": b[1], "frame": b[2]}
                                        for b in bounds]}
-        FRrem = np.zeros_like(FR)
+        # inner front (red) vs. outer product/air edge (dim) — needed for the
+        # pictures, since the stitched front now contains both edges
+        FRin, FRrem, notes = inner_front(FR, BI, NOZZLE_CENTER)
+        for n_ in notes:
+            warn(flame, f"{pre}instantaneous #{ci}: {n_}")
         if INSTANT_AREA:
-            FRin, FRrem, notes = inner_front(FR, BI, NOZZLE_CENTER)
-            for n_ in notes:
-                warn(flame, f"{pre}instantaneous #{ci}: {n_}")
             info["A_inst_mm2"] = round(front_revolution_area(FRin, NOZZLE_CENTER, SPATIAL_RES), 2)
             info["A_inst_note"] = ("inner front only (outer product/air edge removed), "
                                    "each side revolved 180° about NOZZLE_CENTER="
                                    f"{NOZZLE_CENTER}; covers the measured positions only "
                                    "(compare with A_real, not A_total)")
-            info["inner_front_warnings"] = notes
             for d_ in (idir, bdir):
                 atomic_save_npy(os.path.join(d_, f"instant_front_inner_composite_{ci}.npy"), FRin)
-            FR = FRin
+        info["inner_front_warnings"] = notes
+        FR = FRin
         for d_ in (idir, bdir):
             atomic_write_json(os.path.join(d_, f"instant_composite_{ci}_info.json"), info)
 
@@ -1532,7 +1562,7 @@ def finalize_instant(flame, F, positions, t):
                 ax.text(FR.shape[1] - 5, yo + 15, f'pos{p}  frame {fi}', ha='right', va='top',
                         fontsize=7, color='darkorange')
             for k in range(len(jc)):
-                yo = [b[0] for b in bounds if b[1] == ps[k + 1]][0] + data[ps[k + 1]][0].shape[1]
+                yo = [b[0] for b in bounds if b[1] == ps[k + 1]][0] + data[ps[k + 1]][1].shape[1]
                 ax.text(5, yo - 5, f'mismatch {jc[k]:.0f} px', ha='left', va='bottom',
                         fontsize=7, color=txt_color)
 
