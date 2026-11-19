@@ -46,10 +46,21 @@ Usage
   python3 thesis_figures.py RESULTS_DIR
   python3 thesis_figures.py RESULTS_DIR --flame H2_Re30000 --composites 1 2
   python3 thesis_figures.py RESULTS_DIR --formats png --half-width 20
+  python3 thesis_figures.py RESULTS_DIR --redo  # also redraw figures that already exist
   python3 thesis_figures.py                     # RESULTS_DIR = OUTDIR from config_local.py
 RESULTS_DIR is the OUTDIR of ohplif1.py or ohplif2.py, or any folder below it.
 Output: RESULTS_DIR/thesis_figures/threshold_XX/<flame>/  (or --out), plus
-thesis_figures_log.txt with every skipped figure and why.
+thesis_figures_log.txt with every skipped figure and why.  The output folder is
+separate: nothing of the analysis results is changed.
+
+Already drawn figures are skipped
+  Before drawing, each flame's output folder is scanned: a figure that already exists
+  in every requested format is not drawn again (a failed front counts as done once its
+  front_failed/ picture exists), and its data is not even loaded.  So an interrupted
+  run simply continues when started again.  Files are written under a temporary name
+  and renamed when complete, so a half-written figure never counts as done.
+  After changing a setting (colours, width, …) use --redo to draw everything again,
+  or delete the figures you want redrawn.
 
 Needs numpy, scipy, opencv, matplotlib and scikit-image (all in requirements.txt).
 """
@@ -316,8 +327,44 @@ def finish(fig, ax, view, base, formats):
     ax.set_aspect("equal" if view["with_axes"] else "auto")   # pure: figure already has the aspect
     os.makedirs(os.path.dirname(base), exist_ok=True)
     for f in formats:
-        fig.savefig(f"{base}.{f}", dpi=DPI)
+        # written under a temporary name first: a run interrupted mid-save leaves no
+        # half-written figure that the next run would take as finished
+        tmp = f"{base}.{f}.part"
+        fig.savefig(tmp, format=f, dpi=DPI)
+        os.replace(tmp, f"{base}.{f}")
     plt.close(fig)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  What is already in the output folder
+# ══════════════════════════════════════════════════════════════════════
+def scan_existing(out_dir):
+    """Figures already in a flame's output folder, e.g. {"instant_1_raw.png",
+    "average_cbar.pdf", "front_failed/instant_2_front_failed.png"}.  Empty files do
+    not count; unfinished .part files of an interrupted run are deleted (they are
+    only ever this script's own temporary files)."""
+    have = set()
+    for sub in ("", "front_failed"):
+        d = os.path.join(out_dir, sub)
+        if not os.path.isdir(d):
+            continue
+        for fn in os.listdir(d):
+            p = os.path.join(d, fn)
+            if fn.endswith(".part") and os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+                continue
+            if not os.path.isfile(p) or os.path.getsize(p) == 0:
+                continue
+            have.add(f"{sub}/{fn}" if sub else fn)
+    return have
+
+
+def already_drawn(have, name, formats):
+    """True when the figure `name` exists in every requested format."""
+    return all(f"{name}.{f}" in have for f in formats)
 
 
 def smooth_line(xy, n):
@@ -396,8 +443,9 @@ def raw_from_spe(info, folder_flame, fdir):
     return np.vstack(strips)
 
 
-def load_instant(fdir, folder_flame, ci, from_spe):
-    """→ info, binary composite (bool), raw composite (float) or None, raw source, notes."""
+def load_instant(fdir, folder_flame, ci, from_spe, load_raw=True):
+    """→ info, binary composite (bool), raw composite (float) or None, raw source, notes.
+    load_raw=False: the raw frames are not needed (their figures exist) → not read."""
     notes = []
     info = load_info(fdir, ci)
     if info is None:
@@ -408,7 +456,9 @@ def load_instant(fdir, folder_flame, ci, from_spe):
         notes.append("binary composite missing")
     raw, src = None, ""
     rp = os.path.join(fdir, INST_DIR, f"instant_raw_composite_{ci}.npy")
-    if not from_spe and os.path.isfile(rp):
+    if not load_raw:
+        pass
+    elif not from_spe and os.path.isfile(rp):
         raw, src = np.load(rp).astype(np.float32), "saved composite"
     else:
         try:
@@ -505,20 +555,33 @@ def rescan_front(BI, nc):
     return R
 
 
-def draw_instant(fdir, folder_flame, ci, G, out_dir, formats, from_spe, stats):
-    info, BI, raw, src, notes = load_instant(fdir, folder_flame, ci, from_spe)
+def draw_instant(fdir, folder_flame, ci, G, out_dir, formats, from_spe, stats, have):
     tag = f"#{ci}"
+    name = f"instant_{ci}"
+    need_raw = not already_drawn(have, f"{name}_raw", formats)
+    need_bin = not already_drawn(have, f"{name}_binary", formats)
+    need_front = not (already_drawn(have, f"{name}_front", formats)
+                      or f"front_failed/{name}_front_failed.png" in have)
+    skipped = [k for k, need in (("raw", need_raw), ("binary", need_bin),
+                                 ("front", need_front)) if not need]
+    stats["skipped"] += len(skipped)
+    if not (need_raw or need_bin or need_front):
+        log(f"    {tag}: already there → skipped")
+        return
+    info, BI, raw, src, notes = load_instant(
+        fdir, folder_flame, ci, from_spe,
+        load_raw=need_raw or (need_front and FRONT_BACKGROUND == "raw"))
     if info is None:
         log(f"    {tag}: skipped ({'; '.join(notes)})")
         return
     for nt in notes:
         log(f"    {tag}: {nt}")
-    base = os.path.join(out_dir, f"instant_{ci}")
-    done = []
+    base = os.path.join(out_dir, name)
+    done = [f"{', '.join(skipped)} already there"] if skipped else []
     rawn = normalise_raw(raw, info) if raw is not None else None
 
     # ── raw signal
-    if rawn is not None:
+    if need_raw and rawn is not None:
         H, W = rawn.shape
         fig, ax, view = new_figure(H, W, G, G.z0, INSTANT_AXES, colorbar=INSTANT_AXES)
         im = show(ax, rawn, view, cmap=RAW_CMAP, vmin=0, vmax=1)
@@ -534,13 +597,17 @@ def draw_instant(fdir, folder_flame, ci, G, out_dir, formats, from_spe, stats):
     H, W = BI.shape
 
     # ── binary: burnt black on white, no lines
-    fig, ax, view = new_figure(H, W, G, G.z0, INSTANT_AXES)
-    show(ax, BI, view, cmap=two_colour_map("white", "black"), vmin=0, vmax=1)
-    finish(fig, ax, view, base + "_binary", formats)
-    done.append("binary")
-    stats["binary"] += 1
+    if need_bin:
+        fig, ax, view = new_figure(H, W, G, G.z0, INSTANT_AXES)
+        show(ax, BI, view, cmap=two_colour_map("white", "black"), vmin=0, vmax=1)
+        finish(fig, ax, view, base + "_binary", formats)
+        done.append("binary")
+        stats["binary"] += 1
 
     # ── front + pockets by flood fill
+    if not need_front:
+        log(f"    {tag}: " + ", ".join(done))
+        return
     R = rescan_front(BI, G.nc)
     if R["status"] != "ok":
         fig, ax, view = new_figure(H, W, G, G.z0, False)
@@ -616,15 +683,23 @@ def measured_cline(left, right):
     return arms
 
 
-def draw_average(fdir, G, out_dir, formats, stats):
+def draw_average(fdir, G, out_dir, formats, stats, have):
     ad = os.path.join(fdir, AVG_DIR)
     cp = os.path.join(ad, "cbar_composite.npy")
     if not (os.path.isfile(cp) and os.path.isfile(os.path.join(ad, "c_lines.npz"))):
         log("    average: skipped (cbar_composite.npy / c_lines.npz missing — DO_CBAR off?)")
         return
-    cb = np.load(cp)
     C = load_clines(fdir)
     levels = list(C)
+    variants = [("average_cbar", [])] + [(f"average_cbar_{lv:g}", [lv]) for lv in levels]
+    if len(levels) > 1:
+        variants.append(("average_all_clines", levels))
+    todo = [v for v in variants if not already_drawn(have, v[0], formats)]
+    stats["skipped"] += len(variants) - len(todo)
+    if not todo:
+        log(f"    average: all {len(variants)} figures already there → skipped")
+        return
+    cb = np.load(cp)
     h_real = G.h_real or cb.shape[0]
     if SHOW_POS0 and G.ext_px > 0:
         img = np.ma.masked_array(cb, mask=np.zeros_like(cb, bool))
@@ -639,10 +714,7 @@ def draw_average(fdir, G, out_dir, formats, stats):
     cmap = colormaps[CBAR_CMAP].copy()
     cmap.set_bad(POS0_GREY)
 
-    variants = [("average_cbar", [])] + [(f"average_cbar_{lv:g}", [lv]) for lv in levels]
-    if len(levels) > 1:
-        variants.append(("average_all_clines", levels))
-    for name, lvs in variants:
+    for name, lvs in todo:
         fig, ax, view = new_figure(H, W, G, z_bottom, AVG_AXES, colorbar=AVG_AXES)
         im = show(ax, img, view, cmap=cmap, vmin=0, vmax=1)
         handles = []
@@ -667,8 +739,10 @@ def draw_average(fdir, G, out_dir, formats, stats):
                          label=r"$\bar{c}$")
         finish(fig, ax, view, os.path.join(out_dir, name), formats)
         stats["average"] += 1
-    log(f"    average: {len(variants)} figures (c̄ levels {', '.join(f'{l:g}' for l in levels)}"
-        + (", pos0 shown" if SHOW_POS0 and G.ext_px > 0 else "") + ")")
+    log(f"    average: {len(todo)} figure{'s' if len(todo) != 1 else ''} (c̄ levels {', '.join(f'{l:g}' for l in levels)}"
+        + (", pos0 shown" if SHOW_POS0 and G.ext_px > 0 else "")
+        + (f"; {len(variants) - len(todo)} already there" if len(todo) < len(variants) else "")
+        + ")")
 
 
 def write_colorbar(out_root, formats):
@@ -681,7 +755,9 @@ def write_colorbar(out_root, formats):
     fig.colorbar(ScalarMappable(Normalize(0, 1), colormaps[CBAR_CMAP]), cax=cax,
                  ticks=[0, 0.25, 0.5, 0.75, 1], label=r"$\bar{c}$")
     for f in formats:
-        fig.savefig(os.path.join(out_root, f"colorbar_cbar.{f}"), dpi=DPI)
+        tmp = os.path.join(out_root, f"colorbar_cbar.{f}.part")
+        fig.savefig(tmp, format=f, dpi=DPI)
+        os.replace(tmp, os.path.join(out_root, f"colorbar_cbar.{f}"))
     plt.close(fig)
 
 
@@ -714,6 +790,9 @@ def main():
                          "composite exists")
     ap.add_argument("--no-average", action="store_true", help="skip the average composites")
     ap.add_argument("--no-instant", action="store_true", help="skip the instantaneous composites")
+    ap.add_argument("--redo", action="store_true",
+                    help="draw everything again, also figures that are already in the output "
+                         "folder (needed after changing a setting)")
     a = ap.parse_args()
     HALF_WIDTH_MM = a.half_width
 
@@ -738,7 +817,10 @@ def main():
     setup_matplotlib()
     os.makedirs(out_root, exist_ok=True)
 
-    stats = {"raw": 0, "binary": 0, "front_ok": 0, "front_failed": [], "average": 0, "thr": None}
+    stats = {"raw": 0, "binary": 0, "front_ok": 0, "front_failed": [], "average": 0,
+             "skipped": 0, "thr": None}
+    if not a.redo:
+        log("Figures already in the output folder are skipped (--redo draws them again)")
     for fdir in fdirs:
         flame, thr = flame_and_threshold(fdir)
         stats["thr"] = thr
@@ -752,9 +834,10 @@ def main():
             continue
         log(f"    axis {G.nc:g} px, {G.res:g} mm/px, bottom of pos1 at z = {G.z0:g} mm  "
             f"[{G.source}]")
+        have = set() if a.redo else scan_existing(out_dir)
         if not a.no_average:
             try:
-                draw_average(fdir, G, out_dir, a.formats, stats)
+                draw_average(fdir, G, out_dir, a.formats, stats, have)
             except Exception as e:
                 log(f"    average: FAILED ({type(e).__name__}: {e})")
         if not a.no_instant:
@@ -765,15 +848,17 @@ def main():
                 log("    instantaneous: none found (DO_INSTANT off?)")
             for ci in ids:
                 try:
-                    draw_instant(fdir, flame, ci, G, out_dir, a.formats, a.from_spe, stats)
+                    draw_instant(fdir, flame, ci, G, out_dir, a.formats, a.from_spe, stats, have)
                 except Exception as e:
                     log(f"    #{ci}: FAILED ({type(e).__name__}: {e})")
 
-    if stats["average"] and not AVG_AXES:
+    if (not AVG_AXES and not a.no_average
+            and (a.redo or not already_drawn(scan_existing(out_root), "colorbar_cbar", a.formats))):
         write_colorbar(out_root, a.formats)
     nf = len(stats["front_failed"])
     log(f"\nDone: {stats['average']} average, {stats['raw']} raw, {stats['binary']} binary, "
-        f"{stats['front_ok']} front figures; {nf} front re-scan(s) failed")
+        f"{stats['front_ok']} front figures drawn; {stats['skipped']} already there (skipped); "
+        f"{nf} front re-scan(s) failed")
     for s in stats["front_failed"]:
         log(f"  front failed: {s}")
     with open(os.path.join(out_root, "thesis_figures_log.txt"), "w") as f:
