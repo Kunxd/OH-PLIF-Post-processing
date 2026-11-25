@@ -406,7 +406,7 @@ def load_info(fdir, ci):
     for d in (INST_DIR, INST_BIN_DIR):
         p = os.path.join(fdir, d, f"instant_composite_{ci}_info.json")
         if os.path.isfile(p):
-            with open(p) as f:
+            with open(p, encoding="utf-8") as f:
                 return json.load(f)
     return None
 
@@ -773,6 +773,11 @@ def default_root():
 
 def main():
     global HALF_WIDTH_MM
+    for stream in (sys.stdout, sys.stderr):      # Windows: "→", "c̄" also when redirected
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser(description="Clean thesis figures from an ohplif1.py / "
                                              "ohplif2.py results folder (nothing is reprocessed).")
     ap.add_argument("results_dir", nargs="?",
@@ -861,7 +866,7 @@ def main():
         f"{nf} front re-scan(s) failed")
     for s in stats["front_failed"]:
         log(f"  front failed: {s}")
-    with open(os.path.join(out_root, "thesis_figures_log.txt"), "w") as f:
+    with open(os.path.join(out_root, "thesis_figures_log.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(LOG_LINES) + "\n")
     print(f"Log → {os.path.join(out_root, 'thesis_figures_log.txt')}")
 
