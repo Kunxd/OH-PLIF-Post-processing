@@ -8,20 +8,22 @@ pipeline already saved and only draws.  Per flame and threshold it writes
 Instantaneous composites (one set per composite #n that ohplif1/2 built, i.e. the
 frames its best-match chaining picked for each position):
   instant_<n>_raw      bg-subtracted OH-PLIF signal of those frames, stitched.  No lines.
-  instant_<n>_binary   the same frames binarized and stitched: burnt black on white.  No lines.
+  instant_<n>_binary   the same frames binarized and stitched: burnt (1) white, unburnt (0)
+                       black.  No lines.
   instant_<n>_front    flame front and pockets, re-detected on the stitched binary with a
                        flood fill from the nozzle (see "Front re-scan").  Composites where
                        the fill leaks out are skipped; a diagnostic picture of each goes to
                        front_failed/.
+  instant_<n>_front_red  the same front and pockets (blue) on the OH-PLIF signal (not
+                       binarised) in a white → red colour map (OH_RED_COLORS).
 Average composite (c̄):
   average_cbar                c̄ field only
   average_cbar_<level>        c̄ field + one c-line
   average_all_clines          c̄ field + all c-lines
-  Only measured data is drawn: no NOZZLE_CENTER line, no position marks, no
-  flame-height markers, no debug distances or synthetic axis, and no pos0 part (the
-  zero-filled rows and the linearly estimated c-line between pos1 and the nozzle).
-  SHOW_POS0 = True brings the pos0 part back: grey "not measured" band, estimated
-  c-line in grey.
+  No NOZZLE_CENTER line, no position marks, no flame-height markers, no debug distances
+  or synthetic axis.  The pos0 part (nozzle exit → bottom of pos1) is shown as a grey
+  "not measured" band with the linearly estimated c-line in grey (SHOW_POS0 = False:
+  measured part only).
 
 Front re-scan
   The stored binary composite never contained the drawn front, so it is used as it
@@ -94,6 +96,13 @@ RAW_NORMALISE   = "position" # "position": each position scaled to its own RAW_P
                              #   normalises every frame before binarising)
                              # "global": one scale for the whole composite
 RAW_PERCENTILE  = 99.5       # this percentile of the signal (> 0) = full colour
+BINARY_BURNT    = "white"    # binary images: colour of burnt gas (1) …
+BINARY_UNBURNT  = "black"    # … and of unburnt gas (0)
+OH_RED_COLORS   = [(0.0, "#ffffff"), (0.45, "#ec3a3a"), (1.0, "#7d1414")]
+                             # instant_<n>_front_red: OH-PLIF signal 0 → 1 (white → red →
+                             # dark red; the reference map ends in black, this one lighter)
+RED_FRONT_COLOR  = "#1f3fbf" # front on the red picture
+RED_POCKET_COLOR = "#1f3fbf" # pockets on the red picture (e.g. "#00a0e0" to tell them apart)
 FRONT_BACKGROUND = "binary"  # "binary" (burnt light grey on white), "raw" or "white"
 BURNT_GREY      = "#d4d4d4"  # burnt gas under the front lines
 FRONT_COLOR     = "#d62728"  # front / pocket pair checked for colour-blind separation
@@ -116,7 +125,7 @@ CLINE_STYLES = {0.5: "-", 0.4: (0, (5, 2)), 0.6: (0, (1, 1.5)), 0.7: (0, (6, 2, 
                              # one line style per c̄ level → readable in black-and-white print
 EXTRA_STYLES = [(0, (3, 1, 1, 1, 1, 1)), (0, (8, 3)), (0, (2, 3)), (0, (10, 2, 2, 2))]
 JOIN_TIP_PX  = 12            # left/right arm ends closer than this → joined at the tip
-SHOW_POS0    = False         # True: show the pos0 part (grey band, estimated c-line in grey)
+SHOW_POS0    = True          # True: show the pos0 part (grey band, estimated c-line in grey)
 POS0_GREY    = "#e6e6e6"
 POS0_LINE    = "#7a7a7a"
 
@@ -389,6 +398,16 @@ def two_colour_map(c0, c1):
     return ListedColormap([c0, c1])
 
 
+def oh_red_cmap():
+    """White → red → dark red map for the OH-PLIF signal (OH_RED_COLORS)."""
+    from matplotlib.colors import LinearSegmentedColormap
+    return LinearSegmentedColormap.from_list("oh_red", OH_RED_COLORS)
+
+
+def binary_cmap():
+    return two_colour_map(BINARY_UNBURNT, BINARY_BURNT)
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  Instantaneous composites
 # ══════════════════════════════════════════════════════════════════════
@@ -560,17 +579,18 @@ def draw_instant(fdir, folder_flame, ci, G, out_dir, formats, from_spe, stats, h
     name = f"instant_{ci}"
     need_raw = not already_drawn(have, f"{name}_raw", formats)
     need_bin = not already_drawn(have, f"{name}_binary", formats)
-    need_front = not (already_drawn(have, f"{name}_front", formats)
-                      or f"front_failed/{name}_front_failed.png" in have)
+    failed = f"front_failed/{name}_front_failed.png" in have
+    need_front = not (already_drawn(have, f"{name}_front", formats) or failed)
+    need_red = not (already_drawn(have, f"{name}_front_red", formats) or failed)
     skipped = [k for k, need in (("raw", need_raw), ("binary", need_bin),
-                                 ("front", need_front)) if not need]
+                                 ("front", need_front), ("front_red", need_red)) if not need]
     stats["skipped"] += len(skipped)
-    if not (need_raw or need_bin or need_front):
+    if not (need_raw or need_bin or need_front or need_red):
         log(f"    {tag}: already there → skipped")
         return
     info, BI, raw, src, notes = load_instant(
         fdir, folder_flame, ci, from_spe,
-        load_raw=need_raw or (need_front and FRONT_BACKGROUND == "raw"))
+        load_raw=need_raw or need_red or (need_front and FRONT_BACKGROUND == "raw"))
     if info is None:
         log(f"    {tag}: skipped ({'; '.join(notes)})")
         return
@@ -596,16 +616,16 @@ def draw_instant(fdir, folder_flame, ci, G, out_dir, formats, from_spe, stats, h
         return
     H, W = BI.shape
 
-    # ── binary: burnt black on white, no lines
+    # ── binary: burnt (1) BINARY_BURNT, unburnt (0) BINARY_UNBURNT, no lines
     if need_bin:
         fig, ax, view = new_figure(H, W, G, G.z0, INSTANT_AXES)
-        show(ax, BI, view, cmap=two_colour_map("white", "black"), vmin=0, vmax=1)
+        show(ax, BI, view, cmap=binary_cmap(), vmin=0, vmax=1)
         finish(fig, ax, view, base + "_binary", formats)
         done.append("binary")
         stats["binary"] += 1
 
     # ── front + pockets by flood fill
-    if not need_front:
+    if not (need_front or need_red):
         log(f"    {tag}: " + ", ".join(done))
         return
     R = rescan_front(BI, G.nc)
@@ -620,7 +640,7 @@ def draw_instant(fdir, folder_flame, ci, G, out_dir, formats, from_spe, stats, h
         stats["front_failed"].append(f"{folder_flame} (thr {thr_pct(stats['thr'])} %) #{ci}: "
                                      + "; ".join(R["notes"]))
         done.append("front FAILED (" + "; ".join(R["notes"]) + ")")
-    else:
+    if R["status"] == "ok" and need_front:
         bgk = FRONT_BACKGROUND if not (FRONT_BACKGROUND == "raw" and rawn is None) else "binary"
         fig, ax, view = new_figure(H, W, G, G.z0, INSTANT_AXES)
         if bgk == "raw":
@@ -644,6 +664,23 @@ def draw_instant(fdir, folder_flame, ci, G, out_dir, formats, from_spe, stats, h
         stats["front_ok"] += 1
         done.append(f"front ({len(R['pockets'])} pockets"
                     + (", " + "; ".join(R["notes"]) if R["notes"] else "") + ")")
+    # ── front + pockets (blue) on the OH-PLIF signal in red
+    if R["status"] == "ok" and need_red:
+        if rawn is None:
+            done.append("front_red skipped (raw frames not available)")
+        else:
+            fig, ax, view = new_figure(H, W, G, G.z0, INSTANT_AXES, colorbar=INSTANT_AXES)
+            im = show(ax, rawn, view, cmap=oh_red_cmap(), vmin=0, vmax=1)
+            style = dict(linewidth=FRONT_LW, solid_joinstyle="round", solid_capstyle="round")
+            for ln in R["front"]:
+                ax.plot(*G.to_mm(ln, H, G.z0), color=RED_FRONT_COLOR, **style)
+            for ln in R["pockets"]:
+                ax.plot(*G.to_mm(ln, H, G.z0), color=RED_POCKET_COLOR, **style)
+            if INSTANT_AXES:
+                fig.colorbar(im, ax=ax, shrink=0.5, label="OH-PLIF signal (normalised)")
+            finish(fig, ax, view, base + "_front_red", formats)
+            stats["front_red"] += 1
+            done.append("front_red")
     log(f"    {tag}: " + ", ".join(done))
 
 
@@ -822,8 +859,8 @@ def main():
     setup_matplotlib()
     os.makedirs(out_root, exist_ok=True)
 
-    stats = {"raw": 0, "binary": 0, "front_ok": 0, "front_failed": [], "average": 0,
-             "skipped": 0, "thr": None}
+    stats = {"raw": 0, "binary": 0, "front_ok": 0, "front_red": 0, "front_failed": [],
+             "average": 0, "skipped": 0, "thr": None}
     if not a.redo:
         log("Figures already in the output folder are skipped (--redo draws them again)")
     for fdir in fdirs:
@@ -862,7 +899,8 @@ def main():
         write_colorbar(out_root, a.formats)
     nf = len(stats["front_failed"])
     log(f"\nDone: {stats['average']} average, {stats['raw']} raw, {stats['binary']} binary, "
-        f"{stats['front_ok']} front figures drawn; {stats['skipped']} already there (skipped); "
+        f"{stats['front_ok']} front, {stats['front_red']} front_red figures drawn; "
+        f"{stats['skipped']} already there (skipped); "
         f"{nf} front re-scan(s) failed")
     for s in stats["front_failed"]:
         log(f"  front failed: {s}")
